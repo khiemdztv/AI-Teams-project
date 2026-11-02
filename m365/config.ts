@@ -44,7 +44,7 @@ export function loadConfig(): M365Config {
     attachRoots: process.env.M365_ATTACH_ROOT ? [process.env.M365_ATTACH_ROOT, join(msteamsStateDir(), 'inbox')] : [],
     downloadDir: process.env.M365_ATTACH_ROOT ? join(process.env.M365_ATTACH_ROOT, 'email-attachments') : undefined,
     filesDir: process.env.M365_ATTACH_ROOT ? join(process.env.M365_ATTACH_ROOT, 'sharepoint-files') : undefined,
-    internalDomains: (process.env.M365_INTERNAL_DOMAINS ?? 'contoso.com')
+    internalDomains: (process.env.M365_INTERNAL_DOMAINS ?? 'fabrikam.com')
       .split(',')
       .map(d => d.trim().toLowerCase())
       .filter(Boolean),

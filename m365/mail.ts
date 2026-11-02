@@ -68,7 +68,7 @@ export type MailOptions = {
   token: () => Promise<string>
   /** The folders attachments may come from. Empty = no attachments. */
   attachRoots?: string[]
-  /** Domains counted as internal, e.g. ["contoso.com"]. */
+  /** Domains counted as internal, e.g. ["fabrikam.com"]. */
   internalDomains: string[]
   /** JSONL log of every send. */
   sendLog: string

@@ -51,7 +51,7 @@ beforeEach(() => {
 function calendar(fetchImpl: any) {
   return new Calendar({
     token: async () => 'ACCESS',
-    internalDomains: ['contoso.com'],
+    internalDomains: ['fabrikam.com'],
     sendLog: join(dir, 'sent.jsonl'),
     fetchImpl,
     now: () => NOW,
@@ -63,7 +63,7 @@ const EVENT = {
   subject: 'Họp vụ việc ABC',
   start: { dateTime: '2026-11-02T09:00:00.0000000', timeZone: VN_ZONE },
   end: { dateTime: '2026-11-02T10:00:00.0000000', timeZone: VN_ZONE },
-  attendees: [{ emailAddress: { address: 'sam@contoso.com', name: 'Sam' }, status: { response: 'accepted' } }],
+  attendees: [{ emailAddress: { address: 'sam@fabrikam.com', name: 'Sam' }, status: { response: 'accepted' } }],
   onlineMeeting: { joinUrl: 'https://teams.microsoft.com/l/meetup-join/x' },
   responseStatus: { response: 'organizer' },
   showAs: 'busy',
@@ -107,9 +107,9 @@ describe('reading the calendar', () => {
         },
       }),
     })
-    const out = await calendar(g.fetchImpl).findTime({ attendees: ['Sam@contoso.com'], duration_minutes: 30 })
+    const out = await calendar(g.fetchImpl).findTime({ attendees: ['Sam@fabrikam.com'], duration_minutes: 30 })
     expect(out).toContain('2026-11-02 14:00–14:30')
-    expect(g.calls[0]!.body.attendees).toEqual([{ type: 'required', emailAddress: { address: 'sam@contoso.com' } }])
+    expect(g.calls[0]!.body.attendees).toEqual([{ type: 'required', emailAddress: { address: 'sam@fabrikam.com' } }])
     expect(g.calls[0]!.body.meetingDuration).toBe('PT30M')
   })
 })
@@ -118,7 +118,7 @@ describe('setting up a meeting', () => {
   const ask = {
     subject: 'Họp vụ việc ABC',
     start: '2026-11-02 09:00',
-    attendees: ['sam@contoso.com', 'client@example.com'],
+    attendees: ['sam@fabrikam.com', 'client@example.com'],
   }
 
   test('prepare creates and sends nothing, and flags external attendees', () => {
@@ -135,7 +135,7 @@ describe('setting up a meeting', () => {
     const g = fakeGraph({ 'POST /me/events': () => ({ status: 201, json: EVENT }) })
     const cal = calendar(g.fetchImpl)
     const plan = /plan_id: (\S+)/.exec(cal.prepareEvent(ask))![1]!
-    await expect(cal.createEvent({ plan_id: plan, expect_attendees: ['sam@contoso.com'], expect_start: '2026-11-02 09:00' })).rejects.toThrow(/refused/)
+    await expect(cal.createEvent({ plan_id: plan, expect_attendees: ['sam@fabrikam.com'], expect_start: '2026-11-02 09:00' })).rejects.toThrow(/refused/)
     await expect(cal.createEvent({ plan_id: plan, expect_attendees: ask.attendees, expect_start: '2026-11-02 10:00' })).rejects.toThrow(/refused/)
     expect(g.calls).toHaveLength(0)
 
@@ -158,7 +158,7 @@ describe('setting up a meeting', () => {
 
   test('invitations are rate limited', async () => {
     const lines = Array.from({ length: MAX_INVITES_PER_HOUR }, () =>
-      JSON.stringify({ at: new Date(NOW - 60_000).toISOString(), kind: 'event', to: ['a@contoso.com'] }),
+      JSON.stringify({ at: new Date(NOW - 60_000).toISOString(), kind: 'event', to: ['a@fabrikam.com'] }),
     )
     writeFileSync(join(dir, 'sent.jsonl'), lines.join('\n') + '\n')
     const g = fakeGraph({ 'POST /me/events': () => ({ status: 201, json: EVENT }) })
@@ -178,10 +178,10 @@ describe('uploading to the sender\'s OneDrive', () => {
     const path = join(exportDir, 'Hợp đồng.docx')
     writeFileSync(path, 'docx-bytes')
     const g = fakeGraph({
-      'PUT /me/drive/root:': () => ({ status: 201, json: { name: 'Hợp đồng.docx', size: 10, webUrl: 'https://contoso-my.sharepoint.com/personal/x/Hop.docx' } }),
+      'PUT /me/drive/root:': () => ({ status: 201, json: { name: 'Hợp đồng.docx', size: 10, webUrl: 'https://fabrikam-my.sharepoint.com/personal/x/Hop.docx' } }),
     })
     const out = await files(g.fetchImpl).upload({ path })
-    expect(out).toContain('link: https://contoso-my.sharepoint.com/personal/x/Hop.docx')
+    expect(out).toContain('link: https://fabrikam-my.sharepoint.com/personal/x/Hop.docx')
     expect(g.calls[0]!.url).toContain(`/me/drive/root:/${encodeURIComponent(UPLOAD_FOLDER)}/${encodeURIComponent('Hợp đồng.docx')}:/content`)
     expect(g.calls[0]!.url).toContain('conflictBehavior=rename')
   })
@@ -191,10 +191,10 @@ describe('uploading to the sender\'s OneDrive', () => {
     writeFileSync(path, Buffer.alloc(5 * 1024 * 1024, 1))
     const g = fakeGraph({
       'POST /me/drive/root:': () => ({ json: { uploadUrl: 'https://upload.example.sharepoint.com/session' } }),
-      'PUT https://upload.example.sharepoint.com/session': () => ({ status: 201, json: { name: 'big.pdf', webUrl: 'https://contoso-my.sharepoint.com/big.pdf' } }),
+      'PUT https://upload.example.sharepoint.com/session': () => ({ status: 201, json: { name: 'big.pdf', webUrl: 'https://fabrikam-my.sharepoint.com/big.pdf' } }),
     })
     const out = await files(g.fetchImpl).upload({ path })
-    expect(out).toContain('link: https://contoso-my.sharepoint.com/big.pdf')
+    expect(out).toContain('link: https://fabrikam-my.sharepoint.com/big.pdf')
     const puts = g.calls.filter(c => c.method === 'PUT')
     expect(puts.length).toBeGreaterThan(1)
     expect(puts.every(c => c.headers.get('authorization') === null)).toBe(true)
@@ -226,13 +226,13 @@ describe('cancelling a meeting', () => {
       'POST /me/events/': () => ({ status: 202 }),
     })
     const out = await cal.cancelEvent({ event_id: eventId, ...ask, comment: 'Dời lịch' })
-    expect(out).toContain('sam@contoso.com were sent a cancellation')
+    expect(out).toContain('sam@fabrikam.com were sent a cancellation')
     const post = g.calls.find(c => c.method === 'POST')!
     expect(post.url).toEndWith(`/me/events/${encodeURIComponent(EVENT.id)}/cancel`)
     expect(post.body).toEqual({ comment: 'Dời lịch' })
     const log = JSON.parse(readFileSync(join(dir, 'sent.jsonl'), 'utf8'))
     expect(log.kind).toBe('cancel')
-    expect(log.to).toEqual(['sam@contoso.com'])
+    expect(log.to).toEqual(['sam@fabrikam.com'])
   })
 
   test('an entry with nobody invited is deleted, not cancelled', async () => {
@@ -253,9 +253,9 @@ describe('cancelling a meeting', () => {
   })
 
   test("someone else's meeting cannot be cancelled", async () => {
-    const theirs = { ...EVENT, isOrganizer: false, organizer: { emailAddress: { address: 'alex@contoso.com' } } }
+    const theirs = { ...EVENT, isOrganizer: false, organizer: { emailAddress: { address: 'alex@fabrikam.com' } } }
     const { g, cal, eventId } = await listed({ 'GET /me/events/': () => ({ json: theirs }) })
-    await expect(cal.cancelEvent({ event_id: eventId, ...ask })).rejects.toThrow(/only the organizer \(alex@contoso\.com\)/)
+    await expect(cal.cancelEvent({ event_id: eventId, ...ask })).rejects.toThrow(/only the organizer \(alex@fabrikam\.com\)/)
     expect(g.calls.filter(c => c.method !== 'GET')).toHaveLength(0)
   })
 

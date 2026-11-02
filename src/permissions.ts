@@ -133,10 +133,14 @@ export function permissionTargets<R extends { conversationType?: string; senderI
   allowed: Set<string>,
   turnSenderId: string | undefined,
   admins?: Set<string>,
+  /** An admin viewing as a user (/useransw): ask the admins, as for a real user. */
+  asUser = false,
 ): R[] {
   if (!turnSenderId || !allowed.has(turnSenderId)) return []
   const askers =
-    !admins || admins.has(turnSenderId) ? new Set([turnSenderId]) : new Set([...admins].filter(id => allowed.has(id)))
+    !admins || (admins.has(turnSenderId) && !asUser)
+      ? new Set([turnSenderId])
+      : new Set([...admins].filter(id => allowed.has(id)))
   return refs.filter(ref => ref.conversationType === 'personal' && !!ref.senderId && askers.has(ref.senderId))
 }
 

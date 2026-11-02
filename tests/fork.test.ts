@@ -1,5 +1,5 @@
 /**
- * Tests for the Contoso fork's additions that have no upstream test file:
+ * Tests for the Fabrikam fork's additions that have no upstream test file:
  * the export-folder rule (B1), credential redaction in the queue (B2), inbox
  * cleanup (B3) and the download host allowlist (B4).
  */
@@ -218,9 +218,9 @@ describe('B4: download host allowlist', () => {
   })
 
   test('the tenant can be pinned through MSTEAMS_DOWNLOAD_HOSTS', () => {
-    const hosts = downloadHostsFromEnv(' .contoso.sharepoint.com , .contoso-my.sharepoint.com ')
-    expect(isAllowedDownloadUrl('https://contoso-my.sharepoint.com/x', hosts)).toBe(true)
-    expect(isAllowedDownloadUrl('https://fabrikam-my.sharepoint.com/x', hosts)).toBe(false)
+    const hosts = downloadHostsFromEnv(' .fabrikam.sharepoint.com , .fabrikam-my.sharepoint.com ')
+    expect(isAllowedDownloadUrl('https://fabrikam-my.sharepoint.com/x', hosts)).toBe(true)
+    expect(isAllowedDownloadUrl('https://contoso-my.sharepoint.com/x', hosts)).toBe(false)
   })
 
   test('an empty setting falls back to the default', () => {

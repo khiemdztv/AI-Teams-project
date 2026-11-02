@@ -48,7 +48,7 @@ const TIMESHEET = {
   id: 'item1',
   name: 'LT. Timesheet.Template.xlsx',
   size: 4,
-  webUrl: 'https://contoso.sharepoint.com/sites/HR/Shared%20Documents/Timesheet%20HR-Admin-Accounting%20Team/LT.%20Timesheet.Template.xlsx',
+  webUrl: 'https://fabrikam.sharepoint.com/sites/HR/Shared%20Documents/Timesheet%20HR-Admin-Accounting%20Team/LT.%20Timesheet.Template.xlsx',
   lastModifiedDateTime: '2026-10-20T03:00:00Z',
   file: {},
   parentReference: { driveId: 'drive1' },
@@ -109,7 +109,7 @@ describe('SharePoint and OneDrive files', () => {
 
   test('a failed download does not leak the pre-authorized URL', async () => {
     const fetchImpl = async (url: string) => {
-      if (url.endsWith('/content')) throw new Error('fetch failed: https://contoso.sharepoint.com/_layouts/download.aspx?tempauth=SECRET')
+      if (url.endsWith('/content')) throw new Error('fetch failed: https://fabrikam.sharepoint.com/_layouts/download.aspx?tempauth=SECRET')
       return new Response(JSON.stringify(TIMESHEET))
     }
     const err = await new Files({ token: async () => 'T', downloadDir: dir, fetchImpl })
@@ -127,14 +127,14 @@ describe('short ids (29/10: a 152-character draft id copied back with a run miss
     id: LONG,
     isDraft: true,
     subject: 'Schedule',
-    toRecipients: [{ emailAddress: { address: 'taylor@contoso.com' } }],
+    toRecipients: [{ emailAddress: { address: 'taylor@fabrikam.com' } }],
     ccRecipients: [],
     bccRecipients: [],
     categories: ['Teams Claude'],
   }
 
   function mail(fetchImpl: any) {
-    return new Mail({ token: async () => 'T', internalDomains: ['contoso.com'], sendLog: join(dir, 's.jsonl'), fetchImpl })
+    return new Mail({ token: async () => 'T', internalDomains: ['fabrikam.com'], sendLog: join(dir, 's.jsonl'), fetchImpl })
   }
 
   test('Claude is shown a short draft_id, and sending with it reaches the right draft', async () => {
@@ -144,11 +144,11 @@ describe('short ids (29/10: a 152-character draft id copied back with a run miss
       [`POST /me/messages/${encodeURIComponent(LONG)}/send`]: () => ({ status: 202 }),
     })
     const m = mail(g.fetchImpl)
-    const out = await m.createDraft({ to: ['taylor@contoso.com'], subject: 'Schedule', body: 'b' })
+    const out = await m.createDraft({ to: ['taylor@fabrikam.com'], subject: 'Schedule', body: 'b' })
     const handle = /draft_id: (\S+)/.exec(out)![1]!
     expect(handle).toMatch(/^d_[0-9a-f]{10}$/)
     expect(out).not.toContain(LONG)
-    await m.sendDraft({ draft_id: handle, expect_to: ['taylor@contoso.com'], expect_subject: 'Schedule' })
+    await m.sendDraft({ draft_id: handle, expect_to: ['taylor@fabrikam.com'], expect_subject: 'Schedule' })
     expect(g.calls.some(c => c.url.endsWith(`${encodeURIComponent(LONG)}/send`))).toBe(true)
   })
 
@@ -159,14 +159,14 @@ describe('short ids (29/10: a 152-character draft id copied back with a run miss
       [`POST /me/messages/${encodeURIComponent(LONG)}/send`]: () => ({ status: 202 }),
     })
     // A fresh Mail has never issued this handle.
-    await mail(g.fetchImpl).sendDraft({ draft_id: `d_${hashOf(LONG)}`, expect_to: ['taylor@contoso.com'], expect_subject: 'Schedule' })
+    await mail(g.fetchImpl).sendDraft({ draft_id: `d_${hashOf(LONG)}`, expect_to: ['taylor@fabrikam.com'], expect_subject: 'Schedule' })
     expect(g.calls.some(c => c.url.endsWith(`${encodeURIComponent(LONG)}/send`))).toBe(true)
   })
 
   test('an unknown handle is refused with what to do, and nothing is sent', async () => {
     const g = fakeGraph({ 'GET /me/mailFolders/drafts/messages': () => ({ json: { value: [] } }) })
     await expect(
-      mail(g.fetchImpl).sendDraft({ draft_id: 'd_0000000000', expect_to: ['a@contoso.com'], expect_subject: 's' }),
+      mail(g.fetchImpl).sendDraft({ draft_id: 'd_0000000000', expect_to: ['a@fabrikam.com'], expect_subject: 's' }),
     ).rejects.toThrow(/unknown draft_id "d_0000000000".*mail_list_drafts/)
     expect(g.calls.some(c => c.url.endsWith('/send'))).toBe(false)
   })
@@ -202,7 +202,7 @@ describe('Outlook folders and rules', () => {
   }
 
   function mail(fetchImpl: any) {
-    return new Mail({ token: async () => 'T', internalDomains: ['contoso.com'], sendLog: join(dir, 's.jsonl'), fetchImpl })
+    return new Mail({ token: async () => 'T', internalDomains: ['fabrikam.com'], sendLog: join(dir, 's.jsonl'), fetchImpl })
   }
 
   test('a folder is made once; asking again reuses it', async () => {

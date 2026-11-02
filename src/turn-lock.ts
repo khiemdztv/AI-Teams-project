@@ -34,6 +34,8 @@ export type TurnLock = {
   senderId?: string
   /** Fork (02/11): their Teams display name, for a prompt sent to admins on their behalf. */
   senderName?: string
+  /** Fork (02/11): their role; a 'user' gets the status lines in assistant wording, without icons. */
+  role?: 'admin' | 'user'
   /** The "⏳" status message, edited to "✅" when the turn ends. */
   statusMessageId?: string
 }
@@ -80,14 +82,29 @@ export const STATUS_WORKING = '⏳ Đang xử lý… Tin nhắn mới sẽ chưa
 /** How often the "⏳" line is rewritten with the time spent so far. */
 export const STATUS_TICK_MS = 60 * 1000
 
+/**
+ * Fork (02/11): the same four lines for a non-admin, worded as an assistant
+ * would speak to the boss — no icons, no "Claude", no "bot", no "✅ Xong"
+ * protocol to learn. Admins keep the original lines.
+ */
+export const USER_WORKING = 'Dạ, em đang làm yêu cầu này, xin đợi em một chút.'
+export const USER_TIMED_OUT = 'Dạ, yêu cầu vừa rồi em làm lâu hơn dự kiến. Nếu chưa thấy kết quả, xin nhắn lại giúp em.'
+
 /** The "⏳" line after `now - lock.since`, in whole minutes once past the first. */
 export function formatWorking(lock: TurnLock, now = Date.now()): string {
   const minutes = Math.floor((now - lock.since) / 60_000)
+  if (lock.role === 'user') {
+    return minutes < 1 ? USER_WORKING : `Dạ, em vẫn đang làm (đã ${minutes} phút), xin đợi em thêm một chút.`
+  }
   if (minutes < 1) return STATUS_WORKING
   return `⏳ Đang xử lý… (đã ${minutes} phút). Tin nhắn mới sẽ chưa được nhận cho tới khi có dòng ✅ Xong.`
 }
 
-export function formatBusyNotice(lock: TurnLock, timeZone?: string): string {
+/** To someone whose message arrived mid-turn; `role` is theirs, not the turn's. */
+export function formatBusyNotice(lock: TurnLock, timeZone?: string, role?: 'admin' | 'user'): string {
+  if (role === 'user') {
+    return 'Dạ, em đang làm dở yêu cầu trước nên chưa nhận được tin vừa rồi. Khi em báo xong, xin nhắn lại giúp em.'
+  }
   return (
     `⏳ Claude vẫn đang xử lý yêu cầu trước (từ ${clock(lock.since, timeZone)}). ` +
     'Tin vừa rồi chưa được chuyển cho Claude. Chờ dòng ✅ Xong rồi nhắn lại.'
@@ -95,6 +112,7 @@ export function formatBusyNotice(lock: TurnLock, timeZone?: string): string {
 }
 
 export function formatDone(lock: TurnLock, now = Date.now()): string {
+  if (lock.role === 'user') return 'Dạ, em làm xong rồi. Cần gì thêm, xin cứ nhắn em.'
   const seconds = Math.max(1, Math.round((now - lock.since) / 1000))
   const took = seconds < 60 ? `${seconds} giây` : `${Math.floor(seconds / 60)} phút ${seconds % 60} giây`
   return `✅ Xong (${took}). Có thể nhắn yêu cầu tiếp theo.`
@@ -102,3 +120,7 @@ export function formatDone(lock: TurnLock, now = Date.now()): string {
 
 export const STATUS_TIMED_OUT =
   '⚠️ Không thấy Claude báo xong sau 15 phút. Bot nhận tin mới trở lại; nếu chưa có câu trả lời, nhắn lại yêu cầu.'
+
+export function formatTimedOut(lock: TurnLock): string {
+  return lock.role === 'user' ? USER_TIMED_OUT : STATUS_TIMED_OUT
+}

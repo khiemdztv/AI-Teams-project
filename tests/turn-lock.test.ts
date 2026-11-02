@@ -17,6 +17,9 @@ import {
   formatDone,
   formatWorking,
   STATUS_WORKING,
+  STATUS_TIMED_OUT,
+  USER_WORKING,
+  formatTimedOut,
   MAX_TURN_MS,
 } from '../src/turn-lock.js'
 
@@ -99,6 +102,43 @@ describe('Stop hook', () => {
       const hook = config.hooks[event][0].hooks[0]
       expect(hook.command).toBe('bun')
       expect(hook.args).toEqual(['${CLAUDE_PLUGIN_ROOT}/hooks/turn-done.ts'])
+    }
+  })
+})
+
+describe('status lines for a non-admin (fork, 02/11)', () => {
+  const lock = { since: 0, conversationId: 'a:1', role: 'user' as const }
+  const all = () => [
+    formatWorking(lock, 10_000),
+    formatWorking(lock, 185_000),
+    formatDone(lock, 29_400),
+    formatBusyNotice(lock, 'Asia/Ho_Chi_Minh', 'user'),
+    formatTimedOut(lock),
+  ]
+
+  test('assistant wording, without icons, "Claude", "bot" or the ✅ protocol', () => {
+    for (const text of all()) {
+      expect(text.startsWith('Dạ,')).toBe(true)
+      expect(text).not.toMatch(/[⏳✅⚠️]|Claude|bot|Xong/)
+    }
+  })
+
+  test('the minutes still show while it works', () => {
+    expect(formatWorking(lock, 10_000)).toBe(USER_WORKING)
+    expect(formatWorking(lock, 185_000)).toContain('đã 3 phút')
+  })
+
+  test('the busy notice follows the role of whoever just wrote, not the turn', () => {
+    const adminTurn = { since: 0, conversationId: 'a:1', role: 'admin' as const }
+    expect(formatBusyNotice(adminTurn, 'Asia/Ho_Chi_Minh', 'user').startsWith('Dạ,')).toBe(true)
+    expect(formatBusyNotice(lock, 'Asia/Ho_Chi_Minh', 'admin')).toContain('✅ Xong')
+  })
+
+  test('admins, and locks from before roles, keep the original lines', () => {
+    for (const l of [{ since: 0, conversationId: 'a:1', role: 'admin' as const }, { since: 0, conversationId: 'a:1' }]) {
+      expect(formatWorking(l, 10_000)).toBe(STATUS_WORKING)
+      expect(formatDone(l, 29_400)).toContain('✅ Xong (29 giây)')
+      expect(formatTimedOut(l)).toBe(STATUS_TIMED_OUT)
     }
   })
 })

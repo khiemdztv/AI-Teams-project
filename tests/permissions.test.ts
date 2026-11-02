@@ -249,6 +249,10 @@ describe('admins answer for non-admins (fork, 02/11)', () => {
     expect(permissionTargets(refs, allowed, 'boss').map(r => r.conversationId)).toEqual(['a:boss'])
   })
 
+  test('an admin using /useransw is handled like a user: every admin is asked', () => {
+    expect(permissionTargets(refs, allowed, 'sam', admins, true).map(r => r.conversationId)).toEqual(['a:alex', 'a:sam'])
+  })
+
   test('the first admin to answer settles it; the other gets unknown', () => {
     const pending = new PendingPermissions()
     pending.add('qnyia', 'Read', ['alex', 'sam'], 0, DELEGATED_TTL_MS)

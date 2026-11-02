@@ -32,6 +32,14 @@ import {
   type ConversationType,
 } from './src/gate.js'
 import { appendAssistantLog } from './src/assistant-log.js'
+import {
+  parseViewAsCommand,
+  applyViewAs,
+  readViewAs,
+  effectiveRole,
+  formatViewAsReply,
+  stripViewAsTrigger,
+} from './src/view-as.js'
 import { readAccess, saveAccess, bootStaticAccess, pruneExpired } from './src/access.js'
 import {
   parseVerdict,
@@ -58,9 +66,8 @@ import {
   formatBusyNotice,
   formatDone,
   formatWorking,
+  formatTimedOut,
   STATUS_TICK_MS,
-  STATUS_WORKING,
-  STATUS_TIMED_OUT,
 } from './src/turn-lock.js'
 import { PendingUploadStore } from './src/pending-uploads.js'
 import { handleFileConsentInvoke, uploadToConsentUrl } from './src/file-consent.js'
@@ -240,8 +247,9 @@ mcp.setNotificationHandler(
     // for a non-admin, the admins on their behalf.
     const turn = activeTurn && !isStale(activeTurn) ? activeTurn : null
     const admins = access.admins ? new Set(access.admins.map(id => normalizeSenderId(id))) : undefined
-    const delegated = !!turn?.senderId && roleOf(access, turn.senderId) === 'user'
-    const targets = permissionTargets(conversations.list(), allowed, turn?.senderId, admins)
+    // The turn's role already counts /useransw; a lock without one predates roles.
+    const delegated = !!turn?.senderId && (turn.role ?? roleOf(access, turn.senderId)) === 'user'
+    const targets = permissionTargets(conversations.list(), allowed, turn?.senderId, admins, delegated)
 
     // Bind the request to exactly the people it is sent to: a verdict from
     // anyone else, or from outside a 1:1 chat, does not count.
@@ -668,16 +676,21 @@ let lastTickAt = 0
  * on the previous one. `activeTurn` is set before the first await, so two
  * messages dispatched back to back cannot both claim it.
  */
-async function beginTurn(conversationId: string, senderId: string, senderName?: string): Promise<boolean> {
+async function beginTurn(
+  conversationId: string,
+  senderId: string,
+  senderName: string | undefined,
+  role: 'admin' | 'user',
+): Promise<boolean> {
   if (activeTurn && !isStale(activeTurn)) {
-    await sendPlain(conversationId, formatBusyNotice(activeTurn), err =>
+    await sendPlain(conversationId, formatBusyNotice(activeTurn, undefined, role), err =>
       process.stderr.write(`msteams channel: busy notice failed: ${err}\n`),
     )
     return false
   }
-  if (activeTurn) await endTurn(STATUS_TIMED_OUT)
+  if (activeTurn) await endTurn(formatTimedOut(activeTurn))
 
-  const lock: TurnLock = { since: Date.now(), conversationId, senderId, ...(senderName ? { senderName } : {}) }
+  const lock: TurnLock = { since: Date.now(), conversationId, senderId, role, ...(senderName ? { senderName } : {}) }
   activeTurn = lock
   // Written once, before Claude is notified, so no Stop for this turn can run
   // first. The status message id stays in memory: rewriting the file after the
@@ -687,7 +700,7 @@ async function beginTurn(conversationId: string, senderId: string, senderName?: 
     try {
       const sent: any = await teamsApp.send(conversationId, {
         type: 'message',
-        text: STATUS_WORKING,
+        text: formatWorking(lock),
         textFormat: 'plain',
       } as any)
       if (sent?.id) lock.statusMessageId = String(sent.id)
@@ -774,6 +787,23 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
   // any stranger could seed a proactive-send target.
   conversations.upsert(activity)
 
+  // Fork (02/11): the role this message is handled with. /useransw lets an
+  // admin be answered as a user; it can only lower a role, never raise one.
+  const senderId = normalizeSenderId(String(activity.from?.aadObjectId ?? ''))
+  const realRole = roleOf(access, senderId)
+  const viewAs = parseViewAsCommand(String(activity.text ?? ''))
+  if (viewAs && realRole === 'admin' && conversationType === 'personal') {
+    const on = applyViewAs(STATE_DIR, senderId, viewAs)
+    await sendPlain(normalizeConversationId(String(activity.conversation?.id ?? '')), formatViewAsReply(on), err =>
+      process.stderr.write(`msteams channel: useransw reply failed: ${err}\n`),
+    )
+    return
+  }
+  // "/useransw" inside a sentence: this message only, and Claude never sees the word.
+  const triggered = realRole === 'admin' ? stripViewAsTrigger(String(activity.text ?? '')) : undefined
+  if (triggered !== undefined) activity = { ...activity, text: triggered }
+  const role = triggered !== undefined ? 'user' : effectiveRole(realRole, senderId, readViewAs(STATE_DIR))
+
   // Permission verdict intercept. A gate-approved sender answering "y <code>"
   // is voting on a pending permission request, not chatting — emit the
   // structured event and stop, so the verdict never reaches the session as
@@ -848,6 +878,7 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
       normalizeConversationId(String(activity.conversation?.id ?? '')),
       normalizeSenderId(String(activity.from?.aadObjectId ?? '')),
       typeof activity.from?.name === 'string' ? activity.from.name : undefined,
+      role,
     ))
   )
     return
@@ -878,7 +909,7 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
         activity,
         imagePaths,
         attachments: files,
-        role: roleOf(access, String(activity.from?.aadObjectId ?? '')),
+        role,
       }),
     })
     .catch(err => {
@@ -967,7 +998,7 @@ if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
       void endTurn(formatDone(activeTurn))
     } else if (isStale(activeTurn)) {
       clearTurnLock(STATE_DIR)
-      void endTurn(STATUS_TIMED_OUT)
+      void endTurn(formatTimedOut(activeTurn))
     } else if (teamsApp && activeTurn.statusMessageId && Date.now() - Math.max(lastTickAt, activeTurn.since) >= STATUS_TICK_MS) {
       // Fork addition: show how long the turn has run, once a minute.
       const turn = activeTurn
