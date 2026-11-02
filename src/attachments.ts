@@ -299,6 +299,41 @@ export class AttachmentHandles {
   }
 }
 
+/** A OneDrive/SharePoint file shared into the chat rather than uploaded. */
+export type SharedFile = { name?: string; url: string }
+
+const MAX_SHARED_FILES = 5
+
+/**
+ * Fork addition (02/11): files the sender attached from the cloud (OneDrive,
+ * "Shared with me", SharePoint) or linked in the message. Teams gives these no
+ * `downloadUrl`, so `register` skips them and the message used to arrive as if
+ * nothing were attached. What comes back is only the file's address: it carries
+ * no credential, and m365's files_get opens it with the sender's own access.
+ * An address with a `tempauth` token is a credential and is never returned.
+ */
+export function sharedFiles(activity: Record<string, any>, allowedHosts: string[] = DEFAULT_DOWNLOAD_HOSTS): SharedFile[] {
+  const out: SharedFile[] = []
+  const add = (url: unknown, name?: unknown) => {
+    const u = String(url ?? '').trim().replace(/&amp;/g, '&')
+    if (!u || u.length > 2000 || /tempauth/i.test(u) || !isAllowedDownloadUrl(u, allowedHosts)) return
+    if (out.length >= MAX_SHARED_FILES || out.some(f => f.url === u)) return
+    out.push({ url: u, ...(name ? { name: String(name) } : {}) })
+  }
+  for (const raw of activity.attachments ?? []) {
+    const type = String(raw?.contentType ?? '').toLowerCase()
+    if (isHostedImage(type)) continue
+    if (type === TEAMS_FILE_DOWNLOAD_INFO && raw?.content?.downloadUrl) continue
+    if (type.startsWith('text/html')) {
+      for (const m of String(raw?.content ?? '').matchAll(/href="(https:[^"]+)"/gi)) add(m[1])
+      continue
+    }
+    if (isBodyOrCard(type)) continue
+    add(raw?.contentUrl ?? raw?.content?.url, raw?.name)
+  }
+  return out
+}
+
 /**
  * The sender controls `name`, so it never reaches the filesystem intact. The
  * handle id is ours and already filename-safe; the sender's extension is kept

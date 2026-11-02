@@ -168,12 +168,12 @@ describe('what the approver sees (fork)', () => {
 
 describe('who is asked (fork)', () => {
   const refs = [
-    { conversationId: 'a:alex', conversationType: 'personal', senderId: 'alex' },
+    { conversationId: 'a:kien', conversationType: 'personal', senderId: 'kien' },
     { conversationId: 'a:sam', conversationType: 'personal', senderId: 'sam' },
     { conversationId: 'a:taylor', conversationType: 'personal', senderId: 'taylor' },
     { conversationId: '19:group', conversationType: 'groupChat', senderId: 'taylor' },
   ]
-  const allowed = new Set(['alex', 'sam', 'taylor'])
+  const allowed = new Set(['kien', 'sam', 'taylor'])
 
   test('only the person whose message Claude is working on, in their 1:1 chat', () => {
     expect(permissionTargets(refs, allowed, 'taylor').map(r => r.conversationId)).toEqual(['a:taylor'])
@@ -184,7 +184,7 @@ describe('who is asked (fork)', () => {
   })
 
   test('nobody when the asker has been removed from the allowlist', () => {
-    expect(permissionTargets(refs, new Set(['alex']), 'taylor')).toEqual([])
+    expect(permissionTargets(refs, new Set(['kien']), 'taylor')).toEqual([])
   })
 })
 
@@ -225,16 +225,16 @@ describe('reminding the approver of the code (fork)', () => {
 
 describe('admins answer for non-admins (fork, 02/11)', () => {
   const refs = [
-    { conversationId: 'a:alex', conversationType: 'personal', senderId: 'alex' },
+    { conversationId: 'a:kien', conversationType: 'personal', senderId: 'kien' },
     { conversationId: 'a:sam', conversationType: 'personal', senderId: 'sam' },
     { conversationId: 'a:boss', conversationType: 'personal', senderId: 'boss' },
     { conversationId: '19:group', conversationType: 'groupChat', senderId: 'sam' },
   ]
-  const allowed = new Set(['alex', 'sam', 'boss'])
-  const admins = new Set(['alex', 'sam'])
+  const allowed = new Set(['kien', 'sam', 'boss'])
+  const admins = new Set(['kien', 'sam'])
 
   test("a non-admin's prompt goes to every admin's 1:1 chat, never to the non-admin", () => {
-    expect(permissionTargets(refs, allowed, 'boss', admins).map(r => r.conversationId)).toEqual(['a:alex', 'a:sam'])
+    expect(permissionTargets(refs, allowed, 'boss', admins).map(r => r.conversationId)).toEqual(['a:kien', 'a:sam'])
   })
 
   test("an admin's own prompt still goes only to them", () => {
@@ -242,7 +242,7 @@ describe('admins answer for non-admins (fork, 02/11)', () => {
   })
 
   test('an admin removed from the allowlist is not asked', () => {
-    expect(permissionTargets(refs, new Set(['alex', 'boss']), 'boss', admins).map(r => r.conversationId)).toEqual(['a:alex'])
+    expect(permissionTargets(refs, new Set(['kien', 'boss']), 'boss', admins).map(r => r.conversationId)).toEqual(['a:kien'])
   })
 
   test('without an admins list everyone is asked about their own message, as before', () => {
@@ -250,31 +250,31 @@ describe('admins answer for non-admins (fork, 02/11)', () => {
   })
 
   test('an admin using /useransw is handled like a user: every admin is asked', () => {
-    expect(permissionTargets(refs, allowed, 'sam', admins, true).map(r => r.conversationId)).toEqual(['a:alex', 'a:sam'])
+    expect(permissionTargets(refs, allowed, 'sam', admins, true).map(r => r.conversationId)).toEqual(['a:kien', 'a:sam'])
   })
 
   test('the first admin to answer settles it; the other gets unknown', () => {
     const pending = new PendingPermissions()
-    pending.add('qnyia', 'Read', ['alex', 'sam'], 0, DELEGATED_TTL_MS)
-    expect(pending.approversOf('qnyia').sort()).toEqual(['alex', 'sam'])
+    pending.add('qnyia', 'Read', ['kien', 'sam'], 0, DELEGATED_TTL_MS)
+    expect(pending.approversOf('qnyia').sort()).toEqual(['kien', 'sam'])
     expect(pending.take('qnyia', 'sam', 'personal', 1)).toBe('ok')
-    expect(pending.take('qnyia', 'alex', 'personal', 2)).toBe('unknown')
+    expect(pending.take('qnyia', 'kien', 'personal', 2)).toBe('unknown')
   })
 
   test('a delegated prompt lives five minutes', () => {
     const pending = new PendingPermissions()
-    expect(pending.add('qnyia', 'Read', ['alex'], 0, DELEGATED_TTL_MS)).toBe(5 * 60 * 1000)
+    expect(pending.add('qnyia', 'Read', ['kien'], 0, DELEGATED_TTL_MS)).toBe(5 * 60 * 1000)
   })
 
   test('withdraw retires a live request once, and never one already answered', () => {
     const pending = new PendingPermissions()
-    pending.add('qnyia', 'Read', ['alex'], 0, DELEGATED_TTL_MS)
+    pending.add('qnyia', 'Read', ['kien'], 0, DELEGATED_TTL_MS)
     expect(pending.withdraw('qnyia')).toBe(true)
     expect(pending.withdraw('qnyia')).toBe(false)
-    expect(pending.take('qnyia', 'alex', 'personal', 1)).toBe('unknown')
+    expect(pending.take('qnyia', 'kien', 'personal', 1)).toBe('unknown')
 
-    pending.add('abcde', 'Read', ['alex'], 0, DELEGATED_TTL_MS)
-    expect(pending.take('abcde', 'alex', 'personal', 1)).toBe('ok')
+    pending.add('abcde', 'Read', ['kien'], 0, DELEGATED_TTL_MS)
+    expect(pending.take('abcde', 'kien', 'personal', 1)).toBe('ok')
     expect(pending.withdraw('abcde')).toBe(false)
   })
 

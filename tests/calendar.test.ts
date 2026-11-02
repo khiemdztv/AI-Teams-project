@@ -253,9 +253,9 @@ describe('cancelling a meeting', () => {
   })
 
   test("someone else's meeting cannot be cancelled", async () => {
-    const theirs = { ...EVENT, isOrganizer: false, organizer: { emailAddress: { address: 'alex@fabrikam.com' } } }
+    const theirs = { ...EVENT, isOrganizer: false, organizer: { emailAddress: { address: 'kien.do@fabrikam.com' } } }
     const { g, cal, eventId } = await listed({ 'GET /me/events/': () => ({ json: theirs }) })
-    await expect(cal.cancelEvent({ event_id: eventId, ...ask })).rejects.toThrow(/only the organizer \(alex@fabrikam\.com\)/)
+    await expect(cal.cancelEvent({ event_id: eventId, ...ask })).rejects.toThrow(/only the organizer \(kien\.do@fabrikam\.com\)/)
     expect(g.calls.filter(c => c.method !== 'GET')).toHaveLength(0)
   })
 

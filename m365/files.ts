@@ -152,13 +152,41 @@ export class Files {
    * number added rather than being overwritten.
    */
   async upload(input: { path: string }): Promise<string> {
+    const item = await this.uploadItem(input.path)
+    return [
+      `Uploaded to the sender's OneDrive, folder "${UPLOAD_FOLDER}": ${item.name} (${formatSize(item.size)}).`,
+      `link: ${item.webUrl}`,
+      'Only the sender can open it unless they share it. Send this link in your Teams reply; no Allow click is needed.',
+    ].join('\n')
+  }
+
+  /** A file that upload would accept: inside the export folder and not too large. */
+  checkUploadable(rawPath: string): { path: string; name: string; size: number } {
     const roots = this.opts.uploadRoots ?? []
     if (!roots.length) throw new Error('uploading is disabled (M365_ATTACH_ROOT is not set)')
-    const path = String(input.path ?? '').trim()
+    const path = String(rawPath ?? '').trim()
     assertWithinAnyRoot(path, roots)
     const name = basename(path)
     const size = statSync(path).size
     if (size > MAX_UPLOAD_BYTES) throw new Error(`${name} is larger than ${formatSize(MAX_UPLOAD_BYTES)}`)
+    return { path, name, size }
+  }
+
+  /**
+   * Fork addition (02/11): let named people in the firm open an item in the
+   * sender's OneDrive, without Outlook's sharing email. Nobody else gets access.
+   */
+  async shareWith(itemId: string, emails: string[]): Promise<void> {
+    await this.graph('POST', `/me/drive/items/${encodeURIComponent(itemId)}/invite`, {
+      recipients: emails.map(email => ({ email })),
+      roles: ['read'],
+      requireSignIn: true,
+      sendInvitation: false,
+    })
+  }
+
+  async uploadItem(rawPath: string): Promise<{ id: string; name: string; size: number; webUrl: string }> {
+    const { path, name, size } = this.checkUploadable(rawPath)
     const bytes = readFileSync(path)
     const target = `/me/drive/root:/${encodeURIComponent(UPLOAD_FOLDER)}/${encodeURIComponent(name)}:`
 
@@ -199,10 +227,6 @@ export class Files {
       item = last
     }
     if (!item?.webUrl) throw new Error(`upload of ${name} finished without a link`)
-    return [
-      `Uploaded to the sender's OneDrive, folder "${UPLOAD_FOLDER}": ${item.name ?? name} (${formatSize(item.size ?? size)}).`,
-      `link: ${item.webUrl}`,
-      'Only the sender can open it unless they share it. Send this link in your Teams reply; no Allow click is needed.',
-    ].join('\n')
+    return { id: item.id, name: item.name ?? name, size: item.size ?? size, webUrl: item.webUrl }
   }
 }

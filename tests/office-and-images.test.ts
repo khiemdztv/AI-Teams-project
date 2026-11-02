@@ -72,7 +72,7 @@ describe('Office text', () => {
         '<workbook><sheets><sheet name="Nhân sự" sheetId="1" r:id="rId1"/><sheet name="Phí" sheetId="2" r:id="rId2"/></sheets></workbook>',
       'xl/_rels/workbook.xml.rels':
         '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="/xl/worksheets/sheet2.xml"/></Relationships>',
-      'xl/sharedStrings.xml': '<sst><si><t>Tên</t></si><si><r><t>Phòng</t></r><r><t> ban</t></r></si><si><t>Minh</t></si></sst>',
+      'xl/sharedStrings.xml': '<sst><si><t>Tên</t></si><si><r><t>Phòng</t></r><r><t> ban</t></r></si><si><t>Kiên</t></si></sst>',
       'xl/worksheets/sheet1.xml':
         '<worksheet><sheetData>' +
         '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c></row>' +
@@ -83,7 +83,7 @@ describe('Office text', () => {
     const text = xlsxToText(readZip(book))
     expect(text).toContain('## Nhân sự')
     expect(text).toContain('Tên\t\tPhòng ban')
-    expect(text).toContain('Minh\t42\tIT')
+    expect(text).toContain('Kiên\t42\tIT')
     expect(text).toContain('## Phí\n100000')
   })
 

@@ -39,6 +39,8 @@ export type NormalizeInput = {
    * read from the message.
    */
   role?: 'admin' | 'user'
+  /** Fork addition (02/11): cloud files shared into the chat, by address. */
+  sharedFiles?: { name?: string; url: string }[]
 }
 
 const META_KEY = /^[A-Za-z0-9_]+$/
@@ -116,8 +118,17 @@ export function normalize(input: NormalizeInput): ChannelNotification {
     }
   }
 
+  const shared = input.sharedFiles ?? []
+  if (shared[0]) {
+    put(meta, 'shared_file_url', shared[0].url)
+    if (shared[0].name) put(meta, 'shared_file_name', sanitizeFilename(shared[0].name))
+  }
+  if (shared.length > 1) {
+    put(meta, 'shared_files', shared.map(f => `${sanitizeFilename(f.name ?? 'file')} ${f.url}`).join('; '))
+  }
+
   const text = typeof a.text === 'string' ? a.text : ''
-  const named = attachments.find(f => f.name)?.name
+  const named = attachments.find(f => f.name)?.name ?? shared.find(f => f.name)?.name
   const fallback = named ? `(${sanitizeFilename(named)})` : imagePaths.length ? '(image)' : ''
 
   return { content: text || fallback, meta }

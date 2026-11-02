@@ -199,6 +199,63 @@ function resolveFolder(name: string, paths: Map<string, string>): string {
   throw new Error(`no folder "${name}". Folders: ${names}. Or use all, or ${WELL_KNOWN_FOLDERS.join(', ')}`)
 }
 
+// ---------------------------------------------------------------------------
+// Signature (fork addition, 02/11). Graph has no API for Outlook signatures,
+// so the signature is taken from the person's own sent mail: Outlook on the
+// web and new Outlook wrap it in <div id="Signature">. Images in it point at
+// the source message's inline attachments (cid:), which a new draft lacks, so
+// they are left out rather than sent broken.
+// ---------------------------------------------------------------------------
+
+/** How many sent messages are looked through for a signature. */
+const SIGNATURE_SCAN = 25
+/** A found signature is reused this long before Sent Items is read again. */
+export const SIGNATURE_TTL_MS = 60 * 60 * 1000
+
+/** The <div id="Signature"> block of an HTML body, whole, or undefined. */
+export function extractSignature(html: string): string | undefined {
+  const open = /<div\b[^>]*\bid\s*=\s*["']?(?:x_)?Signature\b[^>]*>/i.exec(html)
+  if (!open) return undefined
+  const tag = /<(\/?)div\b[^>]*>/gi
+  tag.lastIndex = open.index + open[0].length
+  let depth = 1
+  for (let m = tag.exec(html); m; m = tag.exec(html)) {
+    depth += m[1] ? -1 : 1
+    if (depth === 0) {
+      const block = html.slice(open.index, m.index + m[0].length)
+      const clean = block.replace(/<img\b[^>]*\bsrc\s*=\s*["']?cid:[^>]*>/gi, '')
+      return clean.replace(/<[^>]*>|&nbsp;|\s/g, '') ? clean : undefined
+    }
+  }
+  return undefined
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+/** A plain-text body as HTML, line breaks kept, with the signature under it. */
+export function bodyWithSignature(text: string, signature: string): string {
+  const lines = escapeHtml(text).replace(/\r\n?/g, '\n').split('\n').join('<br>')
+  return `<div style="font-family:Aptos,Calibri,Helvetica,sans-serif;font-size:12pt;color:rgb(0,0,0)">${lines}</div><div><br></div>${signature}`
+}
+
+/** The line a draft result ends with, so the sender is told about the signature. */
+function signatureNote(asked: boolean | undefined, signature: string): string {
+  if (asked === false) return 'signature: left out, as asked'
+  return signature
+    ? 'signature: the sender\'s Outlook signature was added under the body'
+    : 'signature: none found in the sender\'s sent mail, so none was added'
+}
+
+/** `html` placed at the top of a reply draft's body, above the quoted thread. */
+export function prependToBody(body: string, html: string): string {
+  const open = /<body\b[^>]*>/i.exec(body)
+  if (!open) return html + body
+  const at = open.index + open[0].length
+  return body.slice(0, at) + html + body.slice(at)
+}
+
 type AttachmentInfo = {
   '@odata.type'?: string
   id: string
@@ -230,6 +287,8 @@ export class Mail {
   private readonly drafts = new Handles('d')
   private readonly messages = new Handles('m')
   private readonly attachments = new Handles('a')
+  /** Per person (the Teams sender acting): their signature, '' when none was found. */
+  private readonly signatures = new Map<string, { html: string; at: number }>()
 
   constructor(private readonly opts: MailOptions) {
     this.fetchImpl = opts.fetchImpl ?? fetch
@@ -257,6 +316,38 @@ export class Mail {
   external(list: string[]): string[] {
     const internal = this.opts.internalDomains.map(d => d.toLowerCase())
     return list.filter(a => !internal.includes(a.split('@')[1] ?? ''))
+  }
+
+  /**
+   * The person's Outlook signature, from the newest sent message that has one
+   * (not ours: those carry it only because we added it). '' when none.
+   */
+  private async signature(): Promise<string> {
+    const who = this.opts.actor?.() ?? ''
+    const cached = this.signatures.get(who)
+    if (cached && this.now() - cached.at < SIGNATURE_TTL_MS) return cached.html
+    let res: any
+    try {
+      res = await this.graph(
+        'GET',
+        `/me/mailFolders/sentitems/messages?$top=${SIGNATURE_SCAN}&$select=body,categories&$orderby=sentDateTime%20desc`,
+        undefined,
+        { Prefer: 'outlook.body-content-type="html"' },
+      )
+    } catch {
+      return '' // a draft without a signature beats no draft; not cached, so the next one tries again
+    }
+    let html = ''
+    for (const m of (res?.value ?? []) as { body?: { content?: string }; categories?: string[] }[]) {
+      if ((m.categories ?? []).includes(DRAFT_CATEGORY)) continue
+      const found = extractSignature(String(m.body?.content ?? ''))
+      if (found) {
+        html = found
+        break
+      }
+    }
+    this.signatures.set(who, { html, at: this.now() })
+    return html
   }
 
   async whoami(): Promise<string> {
@@ -367,29 +458,44 @@ export class Mail {
     reply_to_message_id?: string
     reply_all?: boolean
     attachments?: string[]
+    signature?: boolean
   }): Promise<string> {
     const to = (input.to ?? []).map(parseRecipient)
     const cc = (input.cc ?? []).map(parseRecipient)
+    if (!input.reply_to_message_id) {
+      if (!to.length) throw new Error('at least one "to" recipient is required')
+      if (!input.subject?.trim()) throw new Error('subject is required')
+    }
+    const signature = input.signature === false ? '' : await this.signature()
     let draft: Draft
 
     if (input.reply_to_message_id) {
       // A reply keeps the thread: Graph fills recipients and quotes the original.
+      // With a signature the text goes in as HTML above the quote, since
+      // `comment` is plain text only.
       const action = input.reply_all ? 'createReplyAll' : 'createReply'
       const original = this.messages.full(input.reply_to_message_id, 'reply_to_message_id', 'mail_list_messages')
-      draft = await this.graph('POST', `/me/messages/${encodeURIComponent(original)}/${action}`, {
-        comment: input.body,
-      })
+      draft = await this.graph(
+        'POST',
+        `/me/messages/${encodeURIComponent(original)}/${action}`,
+        signature ? {} : { comment: input.body },
+        signature ? { Prefer: 'outlook.body-content-type="html"' } : {},
+      )
       const patch: Record<string, unknown> = { categories: [DRAFT_CATEGORY] }
       if (to.length) patch.toRecipients = to
       if (cc.length) patch.ccRecipients = cc
       if (input.subject) patch.subject = input.subject
+      if (signature) {
+        const quoted = String((draft as { body?: { content?: string } }).body?.content ?? '')
+        patch.body = { contentType: 'HTML', content: prependToBody(quoted, bodyWithSignature(input.body, signature)) }
+      }
       draft = await this.graph('PATCH', `/me/messages/${encodeURIComponent(draft.id)}`, patch)
     } else {
-      if (!to.length) throw new Error('at least one "to" recipient is required')
-      if (!input.subject?.trim()) throw new Error('subject is required')
       draft = await this.graph('POST', '/me/messages', {
         subject: input.subject,
-        body: { contentType: 'Text', content: input.body },
+        body: signature
+          ? { contentType: 'HTML', content: bodyWithSignature(input.body, signature) }
+          : { contentType: 'Text', content: input.body },
         toRecipients: to,
         ccRecipients: cc,
         categories: [DRAFT_CATEGORY],
@@ -397,7 +503,7 @@ export class Mail {
     }
 
     const attached = await this.attach(draft.id, input.attachments ?? [])
-    return `Draft saved in Outlook (not sent).\n${this.describe(draft, attached)}`
+    return `Draft saved in Outlook (not sent).\n${this.describe(draft, attached)}\n${signatureNote(input.signature, signature)}`
   }
 
   async updateDraft(input: {
@@ -407,13 +513,20 @@ export class Mail {
     subject?: string
     body?: string
     attachments?: string[]
+    signature?: boolean
   }): Promise<string> {
     let draft = await this.ownDraft(input.draft_id)
     const patch: Record<string, unknown> = {}
     if (input.to) patch.toRecipients = input.to.map(parseRecipient)
     if (input.cc) patch.ccRecipients = input.cc.map(parseRecipient)
     if (input.subject !== undefined) patch.subject = input.subject
-    if (input.body !== undefined) patch.body = { contentType: 'Text', content: input.body }
+    let signature: string | undefined
+    if (input.body !== undefined) {
+      signature = input.signature === false ? '' : await this.signature()
+      patch.body = signature
+        ? { contentType: 'HTML', content: bodyWithSignature(input.body, signature) }
+        : { contentType: 'Text', content: input.body }
+    }
     const attachments = input.attachments ?? []
     if (!Object.keys(patch).length && !attachments.length) throw new Error('nothing to change')
     if (Object.keys(patch).length) {
@@ -421,7 +534,8 @@ export class Mail {
     }
     // Added to the same draft: a second draft would leave the first behind.
     const attached = await this.attach(draft.id, attachments)
-    return `Draft updated (not sent).\n${this.describe(draft, attached)}`
+    const note = signature === undefined ? '' : `\n${signatureNote(input.signature, signature)}`
+    return `Draft updated (not sent).\n${this.describe(draft, attached)}${note}`
   }
 
   async listDrafts(): Promise<string> {
@@ -696,7 +810,8 @@ export class Mail {
     const since = this.now() - 60 * 60 * 1000
     return lines.filter(line => {
       try {
-        return Date.parse(JSON.parse(line).at) > since
+        const e = JSON.parse(line)
+        return e.kind !== 'teams' && Date.parse(e.at) > since // Teams messages have their own cap
       } catch {
         return false
       }

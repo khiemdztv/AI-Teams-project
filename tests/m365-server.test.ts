@@ -94,7 +94,16 @@ describe('m365 server', () => {
       'mail_read_message',
       'mail_send_draft',
       'mail_update_draft',
+      'teams_list_channels',
+      'teams_list_chats',
+      'teams_prepare_message',
+      'teams_send_message',
     ])
+  })
+
+  test('sending a Teams message requires the plan and the recipients the sender saw', () => {
+    const send = tools.find(t => t.name === 'teams_send_message')
+    expect(send.inputSchema.required).toEqual(['plan_id', 'expect_to'])
   })
 
   test('sending requires the recipients and subject the approver will see', () => {

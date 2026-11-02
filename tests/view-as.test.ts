@@ -27,10 +27,10 @@ describe('the store', () => {
   test('toggle, on and off per admin, kept across reads', () => {
     const dir = mkdtempSync(join(tmpdir(), 'msteams-viewas-'))
     expect(applyViewAs(dir, 'sam', 'toggle')).toBe(true)
-    expect(applyViewAs(dir, 'alex', 'on')).toBe(true)
-    expect([...readViewAs(dir)].sort()).toEqual(['alex', 'sam'])
+    expect(applyViewAs(dir, 'kien', 'on')).toBe(true)
+    expect([...readViewAs(dir)].sort()).toEqual(['kien', 'sam'])
     expect(applyViewAs(dir, 'sam', 'toggle')).toBe(false)
-    expect(applyViewAs(dir, 'alex', 'off')).toBe(false)
+    expect(applyViewAs(dir, 'kien', 'off')).toBe(false)
     expect(readViewAs(dir).size).toBe(0)
     if (process.platform !== 'win32') expect(statSync(join(dir, VIEW_AS_FILE)).mode & 0o777).toBe(0o600)
   })
@@ -48,7 +48,7 @@ describe('the role', () => {
   test('only lowers: an admin viewing as a user is a user, a user stays a user', () => {
     const on = new Set(['sam', 'boss'])
     expect(effectiveRole('admin', 'sam', on)).toBe('user')
-    expect(effectiveRole('admin', 'alex', on)).toBe('admin')
+    expect(effectiveRole('admin', 'kien', on)).toBe('admin')
     expect(effectiveRole('user', 'boss', on)).toBe('user')
     expect(effectiveRole('user', 'boss', new Set())).toBe('user')
   })
