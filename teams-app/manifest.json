@@ -1,0 +1,35 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "__BOT_ID__",
+  "developer": {
+    "name": "khiemdztv",
+    "websiteUrl": "https://example.com",
+    "privacyUrl": "https://example.com",
+    "termsOfUseUrl": "https://example.com"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "Teams Claude",
+    "full": "Teams Claude — trợ lý Claude qua Teams"
+  },
+  "description": {
+    "short": "Nhắn tin với trợ lý Claude qua Teams.",
+    "full": "Kết nối một cuộc chat 1-1 trên Microsoft Teams với phiên Claude Code chạy trên máy chủ của bạn. Chỉ người có tên trong danh sách được phép mới dùng được; mọi thao tác có tác động phải được duyệt trong chat trước khi chạy."
+  },
+  "accentColor": "#4F46E5",
+  "bots": [
+    {
+      "botId": "__BOT_ID__",
+      "scopes": ["personal"],
+      "isNotificationOnly": false,
+      "supportsFiles": true
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": []
+}

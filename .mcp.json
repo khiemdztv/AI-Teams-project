@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "msteams": {
+      "command": "bun",
+      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
+    },
+    "m365": {
+      "command": "bun",
+      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "m365"]
+    }
+  }
+}

@@ -1,0 +1,27 @@
+node_modules/
+*.DS_Store
+.claude/*
+!.claude/skills/
+.env
+
+
+# Local agent scaffolding — operator's own state, never part of the plugin
+.claude-code-hermit/
+.worktreeinclude
+.claude/cost-log.jsonl
+.claude/scheduled_tasks.lock
+.claude.local/
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Claude Code sandbox (sets $HOME to CWD, dropping shell dotfiles here)
+.bash_profile
+.bashrc
+.zshrc
+.zprofile
+.profile
+.gitconfig
+.ripgreprc
+
+# Graphify
+/graphify-out

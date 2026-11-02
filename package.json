@@ -1,0 +1,26 @@
+{
+  "name": "msteams-channel",
+  "version": "0.0.1-fork.1",
+  "license": "MIT",
+  "type": "module",
+  "bin": "./server.ts",
+  "scripts": {
+    "start": "bun install --frozen-lockfile --production --no-summary && bun server.ts",
+    "dev": "bun install --frozen-lockfile --no-summary && bun server.ts",
+    "m365": "bun m365/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@microsoft/teams.api": "2.0.14",
+    "@microsoft/teams.apps": "2.0.14",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "jose": "6.2.5",
+    "jwks-rsa": "3.2.2",
+    "typescript": "5.9.3"
+  }
+}

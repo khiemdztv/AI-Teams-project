@@ -1,0 +1,32 @@
+{
+  "name": "msteams-local",
+  "owner": {
+    "name": "khiemdztv"
+  },
+  "metadata": {
+    "description": "Local marketplace for the hardened msteams channel fork."
+  },
+  "plugins": [
+    {
+      "name": "msteams",
+      "description": "Microsoft Teams channel for Claude Code, hardened fork of gtapps/msteams-channel 0.0.1: 1:1 chats only, static allowlist, bound permission relay, export-folder-only file sends.",
+      "version": "0.0.1-fork.1",
+      "category": "productivity",
+      "source": "./",
+      "author": {
+        "name": "khiemdztv (fork of gtapps)"
+      },
+      "license": "MIT",
+      "homepage": "https://github.com/gtapps/msteams-channel",
+      "repository": "https://github.com/gtapps/msteams-channel",
+      "keywords": [
+        "msteams",
+        "teams",
+        "microsoft",
+        "messaging",
+        "channel",
+        "mcp"
+      ]
+    }
+  ]
+}

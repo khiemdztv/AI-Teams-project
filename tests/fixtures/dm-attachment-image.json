@@ -1,0 +1,54 @@
+{
+  "attachments": [
+    {
+      "contentType": "application/vnd.microsoft.teams.file.download.info",
+      "content": {
+        "downloadUrl": "https://example.invalid/REDACTED_ATTACHMENT_URL",
+        "uniqueId": "55555555-5555-4555-8555-555555555555",
+        "fileType": "jpg"
+      },
+      "contentUrl": "https://example.invalid/REDACTED_ATTACHMENT_URL",
+      "name": "test-image.jpg"
+    },
+    {
+      "contentType": "text/html",
+      "content": ""
+    }
+  ],
+  "type": "message",
+  "timestamp": "2026-07-31T17:18:20.0840435Z",
+  "localTimestamp": "2026-07-31T17:18:20.0840435+00:00",
+  "id": "1785518300065",
+  "channelId": "msteams",
+  "serviceUrl": "https://smba.trafficmanager.net/emea/11111111-1111-4111-8111-111111111111/",
+  "from": {
+    "id": "29:1SENDER_THREAD_ID_REDACTED_FOR_FIXTURES",
+    "name": "Test Sender",
+    "aadObjectId": "22222222-2222-4222-8222-222222222222"
+  },
+  "conversation": {
+    "conversationType": "personal",
+    "tenantId": "11111111-1111-4111-8111-111111111111",
+    "id": "a:1PERSONAL_CONVERSATION_ID"
+  },
+  "recipient": {
+    "id": "28:44444444-4444-4444-8444-444444444444",
+    "name": "test-bot"
+  },
+  "entities": [
+    {
+      "locale": "en-US",
+      "country": "US",
+      "platform": "Web",
+      "timezone": "UTC",
+      "type": "clientInfo"
+    }
+  ],
+  "channelData": {
+    "tenant": {
+      "id": "11111111-1111-4111-8111-111111111111"
+    }
+  },
+  "locale": "en-US",
+  "localTimezone": "UTC"
+}

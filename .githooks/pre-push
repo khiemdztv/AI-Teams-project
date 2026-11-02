@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Two people push to this repo. Before any push: fetch, and refuse if the
+# remote branch has commits this clone has not pulled yet, so conflicts are
+# resolved here (git pull --rebase, then tests) and nobody's work is overwritten.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# Skipping it (git push --no-verify) needs the other person's agreement.
+
+remote="$1"
+zero=0000000000000000000000000000000000000000
+
+if ! git fetch --quiet "$remote"; then
+  echo "pre-push: could not fetch $remote; check the connection, then pull before pushing." >&2
+  exit 1
+fi
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue          # deleting a branch
+  case "$remote_ref" in refs/heads/*) ;; *) continue ;; esac
+  branch="${remote_ref#refs/heads/}"
+  tracking="refs/remotes/$remote/$branch"
+  git rev-parse --quiet --verify "$tracking" >/dev/null || continue   # new branch
+  if ! git merge-base --is-ancestor "$tracking" "$local_sha"; then
+    behind=$(git rev-list --count "$local_sha..$tracking")
+    echo "pre-push: $remote/$branch has $behind commit(s) you have not pulled:" >&2
+    git log --oneline --format='  %h %an: %s' "$local_sha..$tracking" | head -10 >&2
+    echo "Run: git pull --rebase $remote $branch   (resolve conflicts, run bun test and bun run typecheck), then push again." >&2
+    status=1
+  fi
+done
+exit $status

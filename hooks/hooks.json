@@ -1,0 +1,19 @@
+{
+  "description": "Release the msteams turn lock when a Claude turn ends, so the next Teams message is accepted",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bun", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/turn-done.ts"], "timeout": 15 }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bun", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/turn-done.ts"], "timeout": 15 }
+        ]
+      }
+    ]
+  }
+}
