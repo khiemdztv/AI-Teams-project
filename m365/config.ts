@@ -7,6 +7,7 @@
  * the attachment folder; each person's refresh token is in `tokens\`.
  */
 
+import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { loadEnvFile } from '../src/env.js'
@@ -30,6 +31,8 @@ export type M365Config = {
   /** One encrypted refresh token per person: `<object id>.dpapi` (DPAPI on Windows, AES key file elsewhere). */
   tokenDir: string
   sendLog: string
+  /** `{"<object id>": ["line of their signature to leave out", ...]}`; optional. */
+  signatureOmitFile: string
   /** Where the msteams channel writes turn.json (who is being answered). */
   msteamsStateDir: string
 }
@@ -50,6 +53,23 @@ export function loadConfig(): M365Config {
       .filter(Boolean),
     tokenDir: join(stateDir, 'tokens'),
     sendLog: join(stateDir, 'sent.jsonl'),
+    signatureOmitFile: join(stateDir, 'signature-omit.json'),
     msteamsStateDir: msteamsStateDir(),
+  }
+}
+
+/**
+ * The signature lines one person wants left out of drafts, from
+ * signature-omit.json. Read whenever a signature is looked up (at most hourly
+ * per person), so an edit needs no restart; a missing or broken file leaves
+ * the signature whole.
+ */
+export function signatureOmit(file: string, objectId: string): string[] {
+  if (!existsSync(file)) return []
+  try {
+    const lines = JSON.parse(readFileSync(file, 'utf8'))?.[objectId.toLowerCase()]
+    return Array.isArray(lines) ? lines.filter((l): l is string => typeof l === 'string') : []
+  } catch {
+    return []
   }
 }

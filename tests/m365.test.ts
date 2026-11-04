@@ -9,7 +9,8 @@ import { describe, expect, test, beforeEach } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
-import { Mail, DRAFT_CATEGORY, MAX_SENDS_PER_HOUR, parseRecipient, parseWhen, MAX_BODY_CHARS, safeFileName, MAX_VIEW_IMAGE_BYTES, extractSignature, bodyWithSignature } from '../m365/mail.js'
+import { Mail, DRAFT_CATEGORY, MAX_SENDS_PER_HOUR, parseRecipient, parseWhen, MAX_BODY_CHARS, safeFileName, MAX_VIEW_IMAGE_BYTES, extractSignature, bodyWithSignature, omitSignatureLines } from '../m365/mail.js'
+import { signatureOmit } from '../m365/config.js'
 import { purgeDownloads } from '../m365/downloads.js'
 import { hashOf } from '../m365/handles.js'
 import { makeImagePreview } from '../src/image-preview.js'
@@ -189,6 +190,49 @@ describe('signature', () => {
     const html: string = patch.body.body.content
     expect(html.indexOf('Đã nhận')).toBeLessThan(html.indexOf('Sam Le'))
     expect(html.indexOf('Sam Le')).toBeLessThan(html.indexOf('quoted'))
+  })
+
+  const TAGLINE =
+    '<div id="Signature"><div><span><b>Sam Le</b></span></div><div><span>IT Intern</span></div>' +
+    '<div><span><br></span></div><div><span><br></span></div>' +
+    '<div><span>The Sophistication to Understand | The Experience to Foresee </span></div>' +
+    '<div><span>The Creativity to Disrupt | The Courage to Take Risks | The Will to Win</span></div></div>'
+
+  test('omitSignatureLines drops the matching lines and the blank lines left at the bottom', () => {
+    const out = omitSignatureLines(TAGLINE, ['the sophistication to understand', 'The Creativity to Disrupt'])
+    expect(out).toBe('<div id="Signature"><div><span><b>Sam Le</b></span></div><div><span>IT Intern</span></div></div>')
+    expect(omitSignatureLines(TAGLINE, [])).toBe(TAGLINE)
+    expect(omitSignatureLines(TAGLINE, ['  '])).toBe(TAGLINE)
+    expect(omitSignatureLines(TAGLINE, ['Sam Le', 'IT Intern', 'Sophistication', 'Creativity'])).toBe('')
+  })
+
+  test('a draft leaves out the lines the person asked to omit', async () => {
+    const g = fakeGraph({
+      'GET /me/mailFolders/sentitems': sent([{ html: TAGLINE }]),
+      'POST /me/messages': () => ({ status: 201, json: DRAFT }),
+    })
+    const m = new Mail({
+      token: async () => 't',
+      internalDomains: ['fabrikam.com'],
+      sendLog: join(exportDir, 'sent.jsonl'),
+      signatureOmit: () => ['The Sophistication to Understand', 'The Creativity to Disrupt'],
+      fetchImpl: g.fetchImpl,
+    })
+    await m.createDraft({ to: ['a@fabrikam.com'], subject: 's', body: 'b' })
+    const html: string = g.calls.find(c => c.method === 'POST')!.body.body.content
+    expect(html).toContain('IT Intern')
+    expect(html).not.toContain('Sophistication')
+    expect(html).not.toContain('Will to Win')
+  })
+
+  test('signatureOmit reads one person\'s lines; a missing or broken file omits nothing', () => {
+    const file = join(exportDir, 'signature-omit.json')
+    expect(signatureOmit(file, 'abc')).toEqual([])
+    writeFileSync(file, JSON.stringify({ abc: ['Tagline', 3], other: ['x'] }))
+    expect(signatureOmit(file, 'ABC')).toEqual(['Tagline'])
+    expect(signatureOmit(file, 'nobody')).toEqual([])
+    writeFileSync(file, '{broken')
+    expect(signatureOmit(file, 'abc')).toEqual([])
   })
 
   test('no signature found, a failed lookup, or signature: false all leave a plain-text draft', async () => {

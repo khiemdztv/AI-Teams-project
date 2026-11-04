@@ -76,6 +76,8 @@ export type MailOptions = {
   downloadDir?: string
   /** Who is sending (Entra object id), for the log. */
   actor?: () => string
+  /** Lines of the acting person's Outlook signature to leave out of drafts (see omitSignatureLines). */
+  signatureOmit?: () => string[]
   fetchImpl?: Fetch
   now?: () => number
 }
@@ -230,6 +232,34 @@ export function extractSignature(html: string): string | undefined {
   return undefined
 }
 
+/** Visible text of an HTML fragment, lower-cased with spaces collapsed, for matching. */
+function foldText(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+/**
+ * The signature without the lines (innermost <div>/<p>) whose text contains
+ * one of `phrases`, e.g. a firm tagline the person keeps in Outlook but not in
+ * drafts the bot writes. Blank lines left at the bottom go too; '' when
+ * nothing visible is left.
+ */
+export function omitSignatureLines(signature: string, phrases: string[]): string {
+  const want = phrases.map(foldText).filter(Boolean)
+  if (!want.length) return signature
+  let html = signature.replace(/<(div|p)\b[^>]*>((?:(?!<\/?(?:div|p)\b)[\s\S])*)<\/\1>/gi, (line, _tag, inner) =>
+    want.some(w => foldText(inner).includes(w)) ? '' : line,
+  )
+  const blankLast = /<(div|p)\b[^>]*>(?:\s|&nbsp;|<br\s*\/?>|<\/?span\b[^>]*>)*<\/\1>(\s*<\/div>\s*)$/i
+  while (blankLast.test(html)) html = html.replace(blankLast, '$2')
+  return foldText(html) ? html : ''
+}
+
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
@@ -342,7 +372,7 @@ export class Mail {
       if ((m.categories ?? []).includes(DRAFT_CATEGORY)) continue
       const found = extractSignature(String(m.body?.content ?? ''))
       if (found) {
-        html = found
+        html = omitSignatureLines(found, this.opts.signatureOmit?.() ?? [])
         break
       }
     }

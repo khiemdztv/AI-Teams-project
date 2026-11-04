@@ -16,7 +16,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { mkdirSync } from 'fs'
-import { loadConfig } from './config.js'
+import { loadConfig, signatureOmit } from './config.js'
 import { Mail } from './mail.js'
 import { Files } from './files.js'
 import { Calendar } from './calendar.js'
@@ -45,6 +45,7 @@ const mail = new Mail({
   downloadDir: config.downloadDir,
   internalDomains: config.internalDomains,
   sendLog: config.sendLog,
+  signatureOmit: () => signatureOmit(config.signatureOmitFile, currentSender(config.msteamsStateDir)),
 })
 
 const files = new Files({ token, downloadDir: config.filesDir, uploadRoots: config.attachRoots })
