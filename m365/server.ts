@@ -303,7 +303,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           topic: { type: 'string', description: 'Name for a new group chat' },
           file_path: {
             type: 'string',
-            description: 'Optional file from the export folder (e.g. a PDF you made): on sending it goes to the sender\'s OneDrive, is shared with the recipients only, and is linked in the message. Not for channels.',
+            description: 'Optional file from the export folder (e.g. a PDF you made): on sending it goes to the sender\'s OneDrive, is shared with the recipients only, and is linked in the message. For a channel it goes into the channel\'s Files tab instead, where the channel\'s members can open it.',
           },
         },
         required: ['text'],

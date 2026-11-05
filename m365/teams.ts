@@ -107,8 +107,12 @@ type Plan = {
   recipients: string[]
   label: string
   text: string
-  /** A file from the export folder, uploaded and shared with the recipients only when sent. */
-  file?: { path: string; name: string; size: number }
+  /**
+   * A file from the export folder, uploaded only when sent: to the sender's
+   * OneDrive and shared with the recipients, or for a channel into its Files
+   * folder (`folder`), which the channel's members can already open.
+   */
+  file?: { path: string; name: string; size: number; folder?: { driveId: string; itemId: string } }
   at: number
 }
 
@@ -263,7 +267,6 @@ export class TeamsChats {
     if (given.length !== 1) throw new Error('give exactly one of to, chat_id or channel_id')
     let file: Plan['file']
     if (input.file_path) {
-      if (input.channel_id) throw new Error('a file cannot go to a channel here; put it in the channel\'s Files tab, or send its files_upload link')
       if (!this.opts.files) throw new Error('sending files is disabled (M365_ATTACH_ROOT is not set)')
       file = this.opts.files.checkUploadable(input.file_path)
     }
@@ -309,6 +312,7 @@ export class TeamsChats {
       target = { kind: 'channel', teamId, channelId }
       recipients = [name.toLowerCase()]
       label = `channel ${name} (everyone in it can read it)`
+      if (file) file = { ...file, folder: await this.channelFolder(teamId, channelId) }
     }
 
     const plan: Plan = { actor: this.opts.actor?.() ?? '', target, recipients, label, text, ...(file ? { file } : {}), at: this.now() }
@@ -323,10 +327,39 @@ export class TeamsChats {
       `expect_to: ${recipients.join(', ')}`,
       ext.length ? `EXTERNAL people in this chat (outside the firm): ${ext.join(', ')}` : '',
       `message:\n${text}`,
-      file ? `file: ${file.name} (${formatSize(file.size)}), put in the sender's OneDrive and shared with ${this.shareable(recipients).join(', ') || 'nobody'} only, linked at the end of the message` : '',
+      !file
+        ? ''
+        : file.folder
+          ? `file: ${file.name} (${formatSize(file.size)}), put in the channel's Files tab (the team's SharePoint, where everyone in the channel can open it), linked at the end of the message`
+          : `file: ${file.name} (${formatSize(file.size)}), put in the sender's OneDrive and shared with ${this.shareable(recipients).join(', ') || 'nobody'} only, linked at the end of the message`,
     ]
       .filter(Boolean)
       .join('\n')
+  }
+
+  /**
+   * Where a channel keeps its files (the Files tab): a folder in the team's
+   * SharePoint. Read at prepare time, so a channel whose folder cannot be
+   * opened fails before the sender is asked to confirm.
+   */
+  private async channelFolder(teamId: string, channelId: string): Promise<{ driveId: string; itemId: string }> {
+    let folder: any
+    try {
+      folder = await this.graph(
+        'GET',
+        `/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/filesFolder?$select=id,parentReference`,
+      )
+    } catch (err) {
+      if (err instanceof GraphError && err.status === 404) {
+        throw new Error('this channel has no Files folder yet: open its Files tab in Teams once, then try again')
+      }
+      if (err instanceof GraphError && err.status === 403) throw new Error('the sender cannot open this channel\'s Files folder')
+      throw err
+    }
+    const driveId = String(folder?.parentReference?.driveId ?? '')
+    const itemId = String(folder?.id ?? '')
+    if (!driveId || !itemId) throw new Error('the channel\'s Files folder could not be found')
+    return { driveId, itemId }
   }
 
   /** Step 2: send the prepared message, as the sender. */
@@ -350,7 +383,11 @@ export class TeamsChats {
     this.plans.delete(planId)
 
     let content = textToTeamsHtml(plan.text)
-    if (plan.file) {
+    if (plan.file?.folder) {
+      // The channel's own folder: its members can open the file without a share.
+      const item = await this.opts.files!.uploadItem(plan.file.path, plan.file.folder)
+      content += `<br><br>📎 <a href="${escapeAttr(item.webUrl)}">${escapeAttr(item.name)}</a>`
+    } else if (plan.file) {
       // Shared before anything is sent, so the link already opens for them.
       const item = await this.opts.files!.uploadItem(plan.file.path)
       const people = this.shareable(plan.recipients)

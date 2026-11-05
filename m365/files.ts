@@ -185,10 +185,20 @@ export class Files {
     })
   }
 
-  async uploadItem(rawPath: string): Promise<{ id: string; name: string; size: number; webUrl: string }> {
+  /**
+   * Upload into the sender's OneDrive, or into `folder` when given: a folder
+   * in another drive the sender can write to, such as a channel's Files
+   * folder in its team's SharePoint (05/11).
+   */
+  async uploadItem(
+    rawPath: string,
+    folder?: { driveId: string; itemId: string },
+  ): Promise<{ id: string; name: string; size: number; webUrl: string }> {
     const { path, name, size } = this.checkUploadable(rawPath)
     const bytes = readFileSync(path)
-    const target = `/me/drive/root:/${encodeURIComponent(UPLOAD_FOLDER)}/${encodeURIComponent(name)}:`
+    const target = folder
+      ? `/drives/${encodeURIComponent(folder.driveId)}/items/${encodeURIComponent(folder.itemId)}:/${encodeURIComponent(name)}:`
+      : `/me/drive/root:/${encodeURIComponent(UPLOAD_FOLDER)}/${encodeURIComponent(name)}:`
 
     let item: DriveItem
     if (size <= SIMPLE_UPLOAD_BYTES) {

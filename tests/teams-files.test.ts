@@ -88,11 +88,66 @@ describe('a file sent with a Teams message', () => {
     expect(g.calls.indexOf(invite)).toBeLessThan(g.calls.indexOf(msg))
   })
 
-  test('must come from the export folder, and never goes to a channel', async () => {
+  test('must come from the export folder', async () => {
     const g = routes()
     await expect(teams(g.fetchImpl).prepareMessage({ to: ['jimmy.tran@fabrikam.com'], text: 'x', file_path: join(dir, 'elsewhere.pdf') })).rejects.toThrow()
-    await expect(teams(g.fetchImpl).prepareMessage({ channel_id: 'h1', text: 'x', file_path: join(exportDir, 'a.pdf') })).rejects.toThrow(/channel/)
     await expect(teams(g.fetchImpl, false).prepareMessage({ to: ['jimmy.tran@fabrikam.com'], text: 'x', file_path: join(exportDir, 'a.pdf') })).rejects.toThrow(/disabled/)
+  })
+})
+
+describe('a file posted to a channel (05/11)', () => {
+  const ITEM = { id: 'item9', name: 'Bao-cao.pdf', size: 9, webUrl: 'https://fabrikam.sharepoint.com/sites/Fabrikam/Shared%20Documents/General/Bao-cao.pdf' }
+
+  function channelGraph(folder: () => { status?: number; json?: unknown }) {
+    return fakeGraph({
+      'GET /me': () => ({ json: { id: 'u-me', mail: 'sam@fabrikam.com' } }),
+      'GET /me/joinedTeams': () => ({ json: { value: [{ id: 'team1', displayName: 'Fabrikam' }] } }),
+      'GET /teams/team1/channels?': () => ({ json: { value: [{ id: 'ch1', displayName: 'General' }] } }),
+      'GET /teams/team1/channels/ch1?': () => ({ json: { displayName: 'General' } }),
+      'GET /teams/team1/channels/ch1/filesFolder': folder,
+      'GET /teams/team1?': () => ({ json: { displayName: 'Fabrikam' } }),
+      'PUT /drives/': () => ({ status: 201, json: ITEM }),
+      'POST /teams/team1/channels/ch1/messages': () => ({ status: 201, json: { id: 'msg' } }),
+    })
+  }
+
+  async function prepared(g: ReturnType<typeof fakeGraph>) {
+    const pdf = join(exportDir, 'Bao-cao.pdf')
+    writeFileSync(pdf, '%PDF-1.4 x')
+    const t = teams(g.fetchImpl)
+    const channelId = /channel_id: (h_[0-9a-f]{10})/.exec(await t.listChannels())![1]!
+    return { t, ask: { channel_id: channelId, text: 'Báo cáo tuần', file_path: pdf } }
+  }
+
+  test("goes into the channel's Files folder, with no share, and is linked in the post", async () => {
+    const g = channelGraph(() => ({ json: { id: 'folder-general', parentReference: { driveId: 'drive-team1' } } }))
+    const { t, ask } = await prepared(g)
+    const plan = await t.prepareMessage(ask)
+    expect(plan).toMatch(/file: Bao-cao\.pdf \(.+\), put in the channel's Files tab/)
+    expect(plan).not.toContain('OneDrive')
+    expect(g.calls.some(c => c.method !== 'GET')).toBe(false)
+
+    await t.sendMessage({ plan_id: /plan_id: (\S+)/.exec(plan)![1]!, expect_to: ['Fabrikam / General'] })
+    const upload = g.calls.find(c => c.method === 'PUT')!
+    expect(upload.url).toBe(
+      'https://graph.microsoft.com/v1.0/drives/drive-team1/items/folder-general:/Bao-cao.pdf:/content?@microsoft.graph.conflictBehavior=rename',
+    )
+    // Not the sender's OneDrive, and nobody is invited: the channel's members already have the folder.
+    expect(g.calls.some(c => c.url.includes('/me/drive') || c.url.includes('/invite'))).toBe(false)
+    const post = g.calls.find(c => c.url.endsWith('/channels/ch1/messages'))!
+    expect(post.body.body.content).toBe(`Báo cáo tuần<br><br>📎 <a href="${ITEM.webUrl.replace(/&/g, '&amp;')}">Bao-cao.pdf</a>`)
+    expect(g.calls.indexOf(upload)).toBeLessThan(g.calls.indexOf(post))
+  })
+
+  test('a channel whose Files folder cannot be opened fails at prepare, before anything is asked', async () => {
+    const g404 = channelGraph(() => ({ status: 404, json: { error: { code: 'NotFound', message: 'x' } } }))
+    const a = await prepared(g404)
+    await expect(a.t.prepareMessage(a.ask)).rejects.toThrow(/open its Files tab in Teams once/)
+
+    const g403 = channelGraph(() => ({ status: 403, json: { error: { code: 'Forbidden', message: 'x' } } }))
+    const b = await prepared(g403)
+    await expect(b.t.prepareMessage(b.ask)).rejects.toThrow(/cannot open this channel's Files folder/)
+    expect([...g404.calls, ...g403.calls].some(c => c.method !== 'GET')).toBe(false)
   })
 })
 
