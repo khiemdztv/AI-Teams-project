@@ -39,6 +39,8 @@ export type NormalizeInput = {
    * read from the message.
    */
   role?: 'admin' | 'user'
+  /** Fork addition (05/11): the message carried "/force" (src/force.ts). Set by the server. */
+  force?: boolean
   /** Fork addition (02/11): cloud files shared into the chat, by address. */
   sharedFiles?: { name?: string; url: string }[]
 }
@@ -76,6 +78,7 @@ export function normalize(input: NormalizeInput): ChannelNotification {
   put(meta, 'user', a.from?.name)
   put(meta, 'user_id', a.from?.aadObjectId)
   if (input.role) put(meta, 'role', input.role)
+  if (input.force) put(meta, 'force', 'true')
   put(meta, 'tenant_id', a.channelData?.tenant?.id ?? a.conversation?.tenantId)
   put(meta, 'ts', a.timestamp ?? new Date().toISOString())
 

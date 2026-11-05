@@ -121,9 +121,9 @@ describe('setting up a meeting', () => {
     attendees: ['sam@fabrikam.com', 'client@example.com'],
   }
 
-  test('prepare creates and sends nothing, and flags external attendees', () => {
+  test('prepare creates and sends nothing, and flags external attendees', async () => {
     const g = fakeGraph({})
-    const out = calendar(g.fetchImpl).prepareEvent(ask)
+    const out = await calendar(g.fetchImpl).prepareEvent(ask)
     expect(g.calls).toHaveLength(0)
     expect(out).toContain('Nothing has been created or sent yet')
     expect(out).toContain('2026-11-02 09:00–10:00')
@@ -134,7 +134,7 @@ describe('setting up a meeting', () => {
   test('create needs the attendees and start repeated exactly', async () => {
     const g = fakeGraph({ 'POST /me/events': () => ({ status: 201, json: EVENT }) })
     const cal = calendar(g.fetchImpl)
-    const plan = /plan_id: (\S+)/.exec(cal.prepareEvent(ask))![1]!
+    const plan = /plan_id: (\S+)/.exec(await cal.prepareEvent(ask))![1]!
     await expect(cal.createEvent({ plan_id: plan, expect_attendees: ['sam@fabrikam.com'], expect_start: '2026-11-02 09:00' })).rejects.toThrow(/refused/)
     await expect(cal.createEvent({ plan_id: plan, expect_attendees: ask.attendees, expect_start: '2026-11-02 10:00' })).rejects.toThrow(/refused/)
     expect(g.calls).toHaveLength(0)
@@ -152,8 +152,8 @@ describe('setting up a meeting', () => {
     await expect(cal.createEvent({ plan_id: plan, expect_attendees: ask.attendees, expect_start: '2026-11-02 09:00' })).rejects.toThrow(/unknown or expired/)
   })
 
-  test('a meeting in the past is refused', () => {
-    expect(() => calendar(fakeGraph({}).fetchImpl).prepareEvent({ ...ask, start: '2026-10-29 09:00' })).toThrow(/past/)
+  test('a meeting in the past is refused', async () => {
+    await expect(calendar(fakeGraph({}).fetchImpl).prepareEvent({ ...ask, start: '2026-10-29 09:00' })).rejects.toThrow(/past/)
   })
 
   test('invitations are rate limited', async () => {
@@ -163,7 +163,7 @@ describe('setting up a meeting', () => {
     writeFileSync(join(dir, 'sent.jsonl'), lines.join('\n') + '\n')
     const g = fakeGraph({ 'POST /me/events': () => ({ status: 201, json: EVENT }) })
     const cal = calendar(g.fetchImpl)
-    const plan = /plan_id: (\S+)/.exec(cal.prepareEvent(ask))![1]!
+    const plan = /plan_id: (\S+)/.exec(await cal.prepareEvent(ask))![1]!
     await expect(cal.createEvent({ plan_id: plan, expect_attendees: ask.attendees, expect_start: ask.start })).rejects.toThrow(/last hour/)
     expect(g.calls).toHaveLength(0)
   })

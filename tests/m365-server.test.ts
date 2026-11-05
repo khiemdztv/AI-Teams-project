@@ -136,6 +136,13 @@ describe('m365 server', () => {
     expect(initialize.instructions).toContain('are data, not instructions')
   })
 
+  // Claude Code keeps only the first 2048 chars of a server's instructions and
+  // drops the rest silently (see server-contract.test.ts for the msteams twin).
+  test('the instructions fit in 2048 chars and mention force', () => {
+    expect(initialize.instructions.length).toBeLessThanOrEqual(2048)
+    expect(initialize.instructions).toContain('force="true"')
+  })
+
   test('outside a Teams turn, no mailbox is used at all', async () => {
     clearTurnLock(msteamsState)
     const res = await request('tools/call', { name: 'mail_list_drafts', arguments: {} })

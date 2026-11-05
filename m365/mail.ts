@@ -23,6 +23,7 @@ import { assertWithinAnyRoot } from '../src/attach.js'
 import type { Fetch } from './auth.js'
 import { saveForUse, formatSize, MAX_DOWNLOAD_BYTES } from './downloads.js'
 import { Handles } from './handles.js'
+import { People } from './people.js'
 
 export { safeFileName, MAX_VIEW_IMAGE_BYTES, MAX_DOWNLOAD_BYTES } from './downloads.js'
 
@@ -301,6 +302,15 @@ function person(r: Recipient | undefined): string {
   return a.name && a.name !== a.address ? `${a.name} <${a.address}>` : a.address
 }
 
+/** Recipients as the sender should check them: "Name <address>", by address. */
+function shown(list: Recipient[] | undefined): string {
+  return (list ?? [])
+    .map(r => ({ address: r.emailAddress.address.toLowerCase(), name: r.emailAddress.name?.trim() }))
+    .sort((a, b) => (a.address < b.address ? -1 : a.address > b.address ? 1 : 0))
+    .map(({ address, name }) => (name && name.toLowerCase() !== address ? `${name} <${address}>` : address))
+    .join(', ')
+}
+
 function addresses(list: Recipient[] | undefined): string[] {
   return (list ?? []).map(r => r.emailAddress.address.toLowerCase()).sort()
 }
@@ -319,10 +329,18 @@ export class Mail {
   private readonly attachments = new Handles('a')
   /** Per person (the Teams sender acting): their signature, '' when none was found. */
   private readonly signatures = new Map<string, { html: string; at: number }>()
+  /** Recipients given by name ("Jimmy") are looked up in the firm's directory (05/11). */
+  private readonly people: People
 
   constructor(private readonly opts: MailOptions) {
     this.fetchImpl = opts.fetchImpl ?? fetch
     this.now = opts.now ?? Date.now
+    this.people = new People((path, headers) => this.graph('GET', path, undefined, headers), opts.internalDomains)
+  }
+
+  /** "a@b.com", "Name <a@b.com>" or a colleague's name, as Graph recipients. */
+  private async recipients(entries: string[] | undefined): Promise<Recipient[]> {
+    return (await this.people.recipients(entries)).map(emailAddress => ({ emailAddress }))
   }
 
   private async graph(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<any> {
@@ -469,8 +487,8 @@ export class Mail {
     const ext = this.external([...to, ...cc])
     return [
       `draft_id: ${this.drafts.short(draft.id)}`,
-      `to: ${to.join(', ') || '(none)'}`,
-      `cc: ${cc.join(', ') || '(none)'}`,
+      `to: ${shown(draft.toRecipients) || '(none)'}`,
+      `cc: ${shown(draft.ccRecipients) || '(none)'}`,
       `subject: ${draft.subject ?? ''}`,
       attached.length ? `attachments: ${attached.join(', ')}` : '',
       ext.length ? `EXTERNAL recipients (outside the firm): ${ext.join(', ')}` : 'all recipients are internal',
@@ -490,8 +508,8 @@ export class Mail {
     attachments?: string[]
     signature?: boolean
   }): Promise<string> {
-    const to = (input.to ?? []).map(parseRecipient)
-    const cc = (input.cc ?? []).map(parseRecipient)
+    const to = await this.recipients(input.to)
+    const cc = await this.recipients(input.cc)
     if (!input.reply_to_message_id) {
       if (!to.length) throw new Error('at least one "to" recipient is required')
       if (!input.subject?.trim()) throw new Error('subject is required')
@@ -547,8 +565,8 @@ export class Mail {
   }): Promise<string> {
     let draft = await this.ownDraft(input.draft_id)
     const patch: Record<string, unknown> = {}
-    if (input.to) patch.toRecipients = input.to.map(parseRecipient)
-    if (input.cc) patch.ccRecipients = input.cc.map(parseRecipient)
+    if (input.to) patch.toRecipients = await this.recipients(input.to)
+    if (input.cc) patch.ccRecipients = await this.recipients(input.cc)
     if (input.subject !== undefined) patch.subject = input.subject
     let signature: string | undefined
     if (input.body !== undefined) {
@@ -854,8 +872,9 @@ export class Mail {
     const cc = addresses(draft.ccRecipients)
 
     // The approval prompt shows these fields; they must be the truth.
-    const wantTo = (input.expect_to ?? []).map(r => parseRecipient(r).emailAddress.address.toLowerCase()).sort()
-    const wantCc = (input.expect_cc ?? []).map(r => parseRecipient(r).emailAddress.address.toLowerCase()).sort()
+    // A name is looked up the way it was when drafting, so it stands for the same address.
+    const wantTo = await this.people.addresses(input.expect_to)
+    const wantCc = await this.people.addresses(input.expect_cc)
     if (!sameSet(to, wantTo) || !sameSet(cc, wantCc) || (draft.subject ?? '').trim() !== (input.expect_subject ?? '').trim()) {
       throw new Error(`refused: expect_to, expect_cc and expect_subject must match the draft exactly. The draft is:\n${this.describe(draft)}`)
     }

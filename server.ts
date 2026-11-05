@@ -40,6 +40,7 @@ import {
   formatViewAsReply,
   stripViewAsTrigger,
 } from './src/view-as.js'
+import { stripForceTrigger } from './src/force.js'
 import { readAccess, saveAccess, bootStaticAccess, pruneExpired } from './src/access.js'
 import {
   parseVerdict,
@@ -804,6 +805,9 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
   const triggered = realRole === 'admin' ? stripViewAsTrigger(String(activity.text ?? '')) : undefined
   if (triggered !== undefined) activity = { ...activity, text: triggered }
   const role = triggered !== undefined ? 'user' : effectiveRole(realRole, senderId, readViewAs(STATE_DIR))
+  // Fork (05/11): "/force" makes this message the "send it" (src/force.ts).
+  const forced = stripForceTrigger(String(activity.text ?? ''))
+  if (forced !== undefined) activity = { ...activity, text: forced }
 
   // Permission verdict intercept. A gate-approved sender answering "y <code>"
   // is voting on a pending permission request, not chatting — emit the
@@ -918,6 +922,7 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
         attachments: files,
         sharedFiles: shared,
         role,
+        force: forced !== undefined,
       }),
     })
     .catch(err => {

@@ -14,8 +14,9 @@
 import { appendFileSync, mkdirSync, readFileSync } from 'fs'
 import { dirname } from 'path'
 import type { Fetch } from './auth.js'
-import { GraphError, parseRecipient, parseWhen, DRAFT_CATEGORY } from './mail.js'
+import { GraphError, parseWhen, DRAFT_CATEGORY } from './mail.js'
 import { Handles, hashOf } from './handles.js'
+import { People } from './people.js'
 
 const GRAPH = 'https://graph.microsoft.com/v1.0'
 /** Windows time zone name for UTC+7 without daylight saving, as Graph wants it. */
@@ -62,6 +63,8 @@ type Plan = {
   start: string
   end: string
   attendees: string[]
+  /** Directory names of attendees given by name, '' for the others; same order as attendees. */
+  names: string[]
   location?: string
   body?: string
   online: boolean
@@ -94,8 +97,9 @@ function addMinutes(local: string, minutes: number): string {
   return new Date(at + 7 * 3_600_000).toISOString().slice(0, 19)
 }
 
-function emailsOf(list: string[] | undefined): string[] {
-  return (list ?? []).map(r => parseRecipient(r).emailAddress.address.toLowerCase()).sort()
+/** Attendees as the sender should check them: "Name <address>" when looked up by name. */
+function shown(plan: Plan): string[] {
+  return plan.attendees.map((a, i) => (plan.names[i] ? `${plan.names[i]} <${a}>` : a))
 }
 
 export class Calendar {
@@ -103,10 +107,13 @@ export class Calendar {
   private readonly now: () => number
   private readonly events = new Handles('e')
   private readonly plans = new Map<string, Plan>()
+  /** Attendees given by name ("Jimmy") are looked up in the firm's directory (05/11). */
+  private readonly people: People
 
   constructor(private readonly opts: CalendarOptions) {
     this.fetchImpl = opts.fetchImpl ?? fetch
     this.now = opts.now ?? Date.now
+    this.people = new People((path, headers) => this.graph('GET', path, undefined, headers), opts.internalDomains)
   }
 
   private async graph(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<any> {
@@ -162,9 +169,9 @@ export class Calendar {
 
   /** Times when the sender and every attendee are free. */
   async findTime(input: { attendees: string[]; since?: string; until?: string; duration_minutes?: number; top?: number }): Promise<string> {
-    const attendees = emailsOf(input.attendees)
-    if (!attendees.length) throw new Error('attendees is required')
-    if (attendees.length > MAX_ATTENDEES) throw new Error(`at most ${MAX_ATTENDEES} attendees`)
+    if (!input.attendees?.length) throw new Error('attendees is required')
+    if (input.attendees.length > MAX_ATTENDEES) throw new Error(`at most ${MAX_ATTENDEES} attendees`)
+    const attendees = await this.people.addresses(input.attendees)
     const now = this.now()
     const start = parseWhen(input.since ?? 'today', now, false)
     const end = input.until ? parseWhen(input.until, now, true) : new Date(Date.parse(start) + 7 * 86_400_000).toISOString()
@@ -198,7 +205,7 @@ export class Calendar {
   }
 
   /** Step 1: what would be created and sent. Creates nothing. */
-  prepareEvent(input: {
+  async prepareEvent(input: {
     subject: string
     start: string
     duration_minutes?: number
@@ -207,20 +214,25 @@ export class Calendar {
     location?: string
     body?: string
     teams_meeting?: boolean
-  }): string {
+  }): Promise<string> {
     const subject = String(input.subject ?? '').trim()
     if (!subject) throw new Error('subject is required')
     const start = parseLocalTime(input.start)
     const end = input.end ? parseLocalTime(input.end) : addMinutes(start, Math.min(Math.max(Math.floor(input.duration_minutes ?? 60), 5), 12 * 60))
     if (end <= start) throw new Error('the meeting must end after it starts')
     if (Date.parse(`${start}+07:00`) < this.now() - 5 * 60_000) throw new Error('that start time is in the past')
-    const attendees = emailsOf(input.attendees)
-    if (attendees.length > MAX_ATTENDEES) throw new Error(`at most ${MAX_ATTENDEES} attendees`)
+    if ((input.attendees ?? []).length > MAX_ATTENDEES) throw new Error(`at most ${MAX_ATTENDEES} attendees`)
+    const found = (await this.people.recipients(input.attendees))
+      .map(r => ({ address: r.address.toLowerCase(), name: r.name?.trim() }))
+      // The same order as People.addresses, which expect_attendees is compared in.
+      .sort((a, b) => (a.address < b.address ? -1 : a.address > b.address ? 1 : 0))
+    const attendees = found.map(r => r.address)
     const plan: Plan = {
       subject,
       start,
       end,
       attendees,
+      names: found.map(r => (r.name && r.name.toLowerCase() !== r.address ? r.name : '')),
       location: input.location?.trim() || undefined,
       body: input.body?.trim() || undefined,
       online: input.teams_meeting !== false,
@@ -235,7 +247,7 @@ export class Calendar {
       `plan_id: ${id}`,
       `subject: ${subject}`,
       `when: ${start.slice(0, 16).replace('T', ' ')}–${end.slice(11, 16)} (Vietnam time)`,
-      `attendees: ${attendees.join(', ') || '(none: only in your calendar, no invitations)'}`,
+      `attendees: ${shown(plan).join(', ') || '(none: only in your calendar, no invitations)'}`,
       ext.length ? `EXTERNAL attendees (outside the firm): ${ext.join(', ')}` : '',
       plan.location ? `where: ${plan.location}` : '',
       `Teams meeting link: ${plan.online ? 'yes' : 'no'}`,
@@ -249,7 +261,8 @@ export class Calendar {
   async createEvent(input: { plan_id: string; expect_attendees?: string[]; expect_start: string }): Promise<string> {
     const plan = this.plans.get(String(input.plan_id ?? '').trim())
     if (!plan || this.now() - plan.at > PLAN_TTL_MS) throw new Error('unknown or expired plan_id: run calendar_prepare_event again and show the sender the result')
-    const wantAttendees = emailsOf(input.expect_attendees)
+    // A name is looked up the way it was when planning, so it stands for the same address.
+    const wantAttendees = await this.people.addresses(input.expect_attendees)
     let wantStart: string
     try {
       wantStart = parseLocalTime(input.expect_start)
@@ -258,7 +271,7 @@ export class Calendar {
     }
     if (wantStart !== plan.start || wantAttendees.join(',') !== plan.attendees.join(',')) {
       throw new Error(
-        `refused: expect_attendees and expect_start must repeat the plan exactly. The plan is: ${plan.start.slice(0, 16).replace('T', ' ')}, attendees ${plan.attendees.join(', ') || '(none)'}`,
+        `refused: expect_attendees and expect_start must repeat the plan exactly. The plan is: ${plan.start.slice(0, 16).replace('T', ' ')}, attendees ${shown(plan).join(', ') || '(none)'}`,
       )
     }
     if (plan.attendees.length && this.invitesInLastHour() >= MAX_INVITES_PER_HOUR) {
@@ -273,7 +286,10 @@ export class Calendar {
         end: { dateTime: plan.end, timeZone: VN_ZONE },
         ...(plan.location ? { location: { displayName: plan.location } } : {}),
         ...(plan.body ? { body: { contentType: 'text', content: plan.body } } : {}),
-        attendees: plan.attendees.map(address => ({ type: 'required', emailAddress: { address } })),
+        attendees: plan.attendees.map((address, i) => ({
+          type: 'required',
+          emailAddress: plan.names[i] ? { address, name: plan.names[i] } : { address },
+        })),
         isOnlineMeeting: plan.online,
         ...(plan.online ? { onlineMeetingProvider: 'teamsForBusiness' } : {}),
         categories: [DRAFT_CATEGORY],

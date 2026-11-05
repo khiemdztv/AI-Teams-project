@@ -19,6 +19,7 @@ import { dirname } from 'path'
 import type { Fetch } from './auth.js'
 import { GraphError, parseRecipient, parseWhen } from './mail.js'
 import { Handles, hashOf } from './handles.js'
+import { People, type Person } from './people.js'
 import type { Files } from './files.js'
 import { formatSize, saveForUse } from './downloads.js'
 import { sniffImageExt } from '../src/attachments.js'
@@ -40,8 +41,6 @@ const GRAPH = 'https://graph.microsoft.com/v1.0'
 const MAX_CHATS = 50
 const MAX_TEAMS = 20
 const MAX_PEOPLE = 20
-/** Candidates listed when a name matches several people. */
-const MAX_MATCHES = 8
 /** Teams refuses a message much longer than this; keep it readable anyway. */
 export const MAX_MESSAGE_CHARS = 8000
 const PLAN_TTL_MS = 30 * 60 * 1000
@@ -132,16 +131,7 @@ function stripHtml(html: string): string {
   return html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-type User = { id: string; name: string; email: string }
-
-function toUser(u: any): User {
-  return { id: String(u.id), name: String(u.displayName ?? ''), email: String(u.mail || u.userPrincipalName || '').toLowerCase() }
-}
-
-/** Lower case without Vietnamese accents, for comparing names. */
-function fold(s: string): string {
-  return s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/gi, 'd').toLowerCase().trim()
-}
+type User = Person
 
 function norm(list: string[] | undefined): string[] {
   return (list ?? []).map(s => String(s).trim().toLowerCase()).filter(Boolean).sort()
@@ -156,10 +146,12 @@ export class TeamsChats {
   /** Directory user id → email, '' when not found. */
   private readonly emails = new Map<string, string>()
   private readonly plans = new Map<string, Plan>()
+  private readonly people: People
 
   constructor(private readonly opts: TeamsOptions) {
     this.fetchImpl = opts.fetchImpl ?? fetch
     this.now = opts.now ?? Date.now
+    this.people = new People((path, headers) => this.graph('GET', path, undefined, headers), opts.internalDomains)
   }
 
   private async graph(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<any> {
@@ -181,8 +173,7 @@ export class TeamsChats {
   }
 
   private external(list: string[]): string[] {
-    const internal = this.opts.internalDomains.map(d => d.toLowerCase())
-    return list.filter(a => a.includes('@') && !internal.includes(a.split('@')[1] ?? ''))
+    return this.people.external(list)
   }
 
   private async me(): Promise<{ id: string; mail: string }> {
@@ -196,46 +187,22 @@ export class TeamsChats {
   }
 
   /**
-   * A colleague by email, or by name ("Jimmy", "kien"): the directory is
-   * searched by display name and mail, and a name must point at one person.
-   * Several matches are an error listing them, so the sender picks; an exact
-   * display-name match (accents ignored) wins over partial ones.
+   * A colleague by email, or by name ("Jimmy", "kien"): see people.ts. An
+   * email must be in the firm's directory, since a new chat is only ever with
+   * colleagues.
    */
   private async person(entry: string): Promise<User> {
     const raw = String(entry ?? '').trim()
     if (raw.includes('@')) {
-      const email = parseRecipient(raw).emailAddress.address.toLowerCase()
-      try {
-        const user = await this.graph('GET', `/users/${encodeURIComponent(email)}?$select=id,displayName,mail,userPrincipalName`)
-        return toUser(user)
-      } catch (err) {
-        if (err instanceof GraphError && err.status === 404) {
-          throw new Error(`${email} is not in the firm's directory; a new chat can only be with colleagues`)
-        }
-        throw err
+      const user = await this.people.byEmail(raw)
+      if (!user) {
+        const email = parseRecipient(raw).emailAddress.address.toLowerCase()
+        throw new Error(`${email} is not in the firm's directory; a new chat can only be with colleagues`)
       }
+      return user
     }
-    const q = raw.replace(/["\\]/g, '')
-    if (!q) throw new Error('an empty name in "to"')
-    const search = encodeURIComponent(`"displayName:${q}" OR "mail:${q}"`)
-    const res = await this.graph(
-      'GET',
-      `/users?$search=${search}&$select=id,displayName,mail,userPrincipalName&$top=${MAX_MATCHES + 1}`,
-      undefined,
-      { ConsistencyLevel: 'eventual' },
-    )
-    // Guest accounts are in the directory too; a name only finds colleagues.
-    const found = ((res?.value ?? []) as any[]).map(toUser).filter(u => u.email && !this.external([u.email]).length)
-    const exact = found.filter(u => fold(u.name) === fold(q))
-    const pick = exact.length === 1 ? exact : found
-    if (pick.length === 1) return pick[0]!
-    if (!pick.length) throw new Error(`nobody called "${q}" in the firm's directory; ask the sender for the email address`)
-    throw new Error(
-      `"${q}" matches several people; ask the sender which one and pass their email: ${pick
-        .slice(0, MAX_MATCHES)
-        .map(u => `${u.name} <${u.email}>`)
-        .join(', ')}${pick.length > MAX_MATCHES ? ', …' : ''}`,
-    )
+    if (!raw.replace(/["\\]/g, '')) throw new Error('an empty name in "to"')
+    return this.people.byName(raw)
   }
 
   /** The sender's chats, most recent first. */
