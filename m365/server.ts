@@ -1,7 +1,7 @@
 /**
  * m365: an MCP server that reads, drafts and sends Outlook email, reads the
  * calendar and sets up or cancels meetings, and finds and uploads OneDrive/SharePoint
- * files, and sends Teams messages as the signed-in user, through Microsoft Graph with delegated
+ * files, and reads and sends Teams messages as the signed-in user, through Microsoft Graph with delegated
  * permissions (fork addition).
  *
  * The claude.ai Microsoft 365 connector is read-only and signed in as another
@@ -63,6 +63,9 @@ const teams = new TeamsChats({
   internalDomains: config.internalDomains,
   sendLog: config.sendLog,
   files,
+  downloadDir: config.downloadDir,
+  // Tool, short code and count only: message content never reaches a log.
+  log: line => process.stderr.write(`m365: ${line}\n`),
 })
 
 // Saved attachments and files are client documents: kept a week, like the Teams inbox.
@@ -81,6 +84,7 @@ const mcp = new Server(
       'Only drafts these tools created can be changed or sent. There is no forwarding, BCC or deleting.',
       'Calendar: calendar_list_events and calendar_find_time read; a meeting goes in two steps, like email. calendar_prepare_event creates nothing; show its result to the sender (time, attendees, EXTERNAL ones, Teams link) and call calendar_create_event only when they say to, repeating the attendees and start exactly. calendar_cancel_event cancels a meeting the sender organised, only when they ask, repeating its subject and start exactly. Times are Vietnam time, "YYYY-MM-DD HH:MM".',
       'Teams messages under the sender\'s own name (not your reply to them): teams_prepare_message sends nothing; show its result (where it goes, EXTERNAL people, the text) and call teams_send_message only when they say to send it, repeating expect_to exactly. teams_list_chats and teams_list_channels give chat_id and channel_id. A file (PDF, Word) goes with file_path, not a files_upload link: only the recipients can open it.',
+      'To read the sender\'s own Teams messages, teams_read_chat (chat_id) and teams_read_channel (channel_id) are read-only: nothing is marked read, sent or reacted to. A file in a message comes with its url for files_get.',
       'To hand the sender a file without the Teams Allow card, files_upload puts it in their own OneDrive and returns a link to send in your reply.',
     ].join('\n'),
   },
@@ -240,13 +244,48 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'teams_list_chats',
-      description: 'The Teams sender\'s own chats (1:1, group, meeting), most recent first, with who is in each and a chat_id for teams_prepare_message.',
+      description: 'The Teams sender\'s own chats (1:1, group, meeting), most recent first, with who is in each and a chat_id for teams_read_chat and teams_prepare_message.',
       inputSchema: { type: 'object', properties: { top: { type: 'number', description: 'How many, default 20, at most 50' } } },
     },
     {
       name: 'teams_list_channels',
-      description: 'Channels of the teams the Teams sender belongs to, each with a channel_id for teams_prepare_message.',
+      description: 'Channels of the teams the Teams sender belongs to, each with a channel_id for teams_read_channel and teams_prepare_message.',
       inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'teams_read_chat',
+      description:
+        'Read messages in one of the Teams sender\'s own chats (1:1, group, meeting), oldest first, Vietnam time: who wrote, the text, what it replies to, files (with a url for files_get), pictures as [ảnh img_…], reactions, edited or removed. Read-only: nothing is marked read, sent or reacted to. Dates as in mail_list_messages; since defaults to today-7.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string', description: 'The c_… code from teams_list_chats' },
+          since: { type: 'string' },
+          until: { type: 'string', description: 'Exclusive; a date means the end of that day' },
+          top: { type: 'number', description: '1-50, default 30' },
+          search: { type: 'string', description: 'Only messages containing these words' },
+          save_images: { type: 'boolean', description: 'Also save the pictures shown (4MB each, 10 at most) so you can look at them with Read' },
+        },
+        required: ['chat_id'],
+      },
+    },
+    {
+      name: 'teams_read_channel',
+      description:
+        'Read posts in a channel of a team the Teams sender belongs to, oldest first, each with up to 20 replies; shown as in teams_read_chat. Read-only. Dates as in mail_list_messages; since defaults to today-7.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'The h_… code from teams_list_channels' },
+          since: { type: 'string' },
+          until: { type: 'string', description: 'Exclusive; a date means the end of that day' },
+          top: { type: 'number', description: 'Posts, 1-50, default 30' },
+          search: { type: 'string', description: 'Only posts whose text or replies contain these words' },
+          replies: { type: 'boolean', description: 'Default true' },
+          save_images: { type: 'boolean', description: 'Also save the pictures shown (4MB each, 10 at most) so you can look at them with Read' },
+        },
+        required: ['channel_id'],
+      },
     },
     {
       name: 'teams_prepare_message',
@@ -413,6 +452,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         break
       case 'teams_list_channels':
         text = await teams.listChannels()
+        break
+      case 'teams_read_chat':
+        text = await teams.readChat(args)
+        break
+      case 'teams_read_channel':
+        text = await teams.readChannel(args)
         break
       case 'teams_prepare_message':
         text = await teams.prepareMessage(args)

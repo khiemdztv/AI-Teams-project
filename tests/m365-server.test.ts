@@ -97,6 +97,8 @@ describe('m365 server', () => {
       'teams_list_channels',
       'teams_list_chats',
       'teams_prepare_message',
+      'teams_read_channel',
+      'teams_read_chat',
       'teams_send_message',
     ])
   })
