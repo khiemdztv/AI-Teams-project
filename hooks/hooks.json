@@ -1,6 +1,14 @@
 {
-  "description": "Release the msteams turn lock when a Claude turn ends, so the next Teams message is accepted",
+  "description": "Release the msteams turn lock when a Claude turn ends, so the next Teams message is accepted; keep scheduled jobs read-only",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "bun", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scheduled-guard.ts"], "timeout": 15 }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

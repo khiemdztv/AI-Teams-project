@@ -150,6 +150,24 @@ describe('m365 server', () => {
     expect(res.content[0].text).toContain('while answering a Teams message')
   })
 
+  test('a scheduled job may read but never draft, send or create', async () => {
+    writeTurnLock(msteamsState, {
+      since: Date.now(),
+      conversationId: 'a:1',
+      senderId: 'b2b2b2b2-2222-4222-8222-b2b2b2b2b2b2',
+      scheduled: 'morning',
+    })
+    for (const name of ['mail_create_draft', 'mail_send_draft', 'teams_send_message', 'calendar_create_event', 'files_upload']) {
+      const res = await request('tools/call', { name, arguments: {} })
+      expect(res.isError).toBe(true)
+      expect(res.content[0].text).toContain('scheduled job, which only reads')
+    }
+    // A read tool gets as far as the sign-in check.
+    const read = await request('tools/call', { name: 'mail_list_drafts', arguments: {} })
+    expect(read.content[0].text).toContain('bun m365/login.ts')
+    clearTurnLock(msteamsState)
+  })
+
   test('a Teams sender who has not signed in gets the sign-in instruction', async () => {
     writeTurnLock(msteamsState, {
       since: Date.now(),

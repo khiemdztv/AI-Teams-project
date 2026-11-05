@@ -36,6 +36,11 @@ export type TurnLock = {
   senderName?: string
   /** Fork (02/11): their role; a 'user' gets the status lines in assistant wording, without icons. */
   role?: 'admin' | 'user'
+  /**
+   * Fork (05/11): set when a scheduled job (src/schedule.ts) started the turn
+   * rather than a message. Such a turn is read-only: see src/scheduled-guard.ts.
+   */
+  scheduled?: 'morning' | 'evening'
   /** The "⏳" status message, edited to "✅" when the turn ends. */
   statusMessageId?: string
 }

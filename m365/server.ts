@@ -24,6 +24,8 @@ import { TeamsChats } from './teams.js'
 import { UserAuths, currentSender } from './users.js'
 import { purgeDownloads } from './downloads.js'
 import { INBOX_TTL_MS } from '../src/purge.js'
+import { readTurnLock } from '../src/turn-lock.js'
+import { M365_READ_TOOLS, SCHEDULED_REFUSAL } from '../src/scheduled-guard.js'
 
 const config = loadConfig()
 mkdirSync(config.stateDir, { recursive: true, mode: 0o700 })
@@ -409,6 +411,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const args = (req.params.arguments ?? {}) as any
+  // Fork (05/11): a scheduled job (src/schedule.ts) only reads, whatever it is asked.
+  if (readTurnLock(config.msteamsStateDir)?.scheduled && !M365_READ_TOOLS.has(req.params.name)) {
+    return { content: [{ type: 'text', text: SCHEDULED_REFUSAL }], isError: true }
+  }
   try {
     let text: string
     switch (req.params.name) {

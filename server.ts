@@ -79,6 +79,9 @@ import {
   describeFailure,
 } from './src/outbound.js'
 import { graphTokenGetter } from './src/sharepoint.js'
+import { readSchedules, readRan, markRan, dueJobs, jobPrompt, vnClock, type Job } from './src/schedule.js'
+import { listNotes, addNote, doneNote, formatNotes } from './src/notes.js'
+import { MSTEAMS_SCHEDULED_TOOLS, SCHEDULED_REFUSAL } from './src/scheduled-guard.js'
 
 const STATE_DIR = stateDir()
 const INBOX_DIR = join(STATE_DIR, 'inbox')
@@ -410,6 +413,31 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['text'],
       },
     },
+    {
+      name: 'notes_list',
+      description:
+        'The open work the Teams sender asked to be reminded of (their own notes, kept on the bot machine), each with a number for note_done. Only the sender of the current message: nobody else\'s notes.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'note_add',
+      description:
+        'Remember a piece of open work for the Teams sender, in their words, to remind them of it the next morning: when they say what to pick up tomorrow, or ask you to remember a task. One note per task.',
+      inputSchema: {
+        type: 'object',
+        properties: { text: { type: 'string', description: 'The task, short, as the sender said it' } },
+        required: ['text'],
+      },
+    },
+    {
+      name: 'note_done',
+      description: 'Remove one of the sender\'s notes (number from notes_list) when they say it is done or no longer needed.',
+      inputSchema: {
+        type: 'object',
+        properties: { id: { type: 'number' } },
+        required: ['id'],
+      },
+    },
   ],
 }))
 
@@ -418,14 +446,35 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const fail = (text: string) => ({ content: [{ type: 'text' as const, text }], isError: true })
 
   const ok = (text: string) => ({ content: [{ type: 'text' as const, text }] })
+  const turn = activeTurn && !isStale(activeTurn) ? activeTurn : null
+
+  // Fork (05/11): a scheduled job only reads (src/scheduled-guard.ts).
+  if (turn?.scheduled && !MSTEAMS_SCHEDULED_TOOLS.has(req.params.name)) return fail(SCHEDULED_REFUSAL)
 
   // Fork addition: touches no conversation and no network, only local folders.
   if (req.params.name === 'log_internal') {
     const text = String(args.text ?? '').trim()
     if (!text) return fail('text is required')
-    const turn = activeTurn && !isStale(activeTurn) ? activeTurn : null
     appendAssistantLog(STATE_DIR, { kind: 'note', sender: turn?.senderId, senderName: turn?.senderName, text })
     return ok('logged')
+  }
+
+  // Fork (05/11): the sender's own notes, keyed by the turn's sender, never by
+  // anything Claude passes.
+  if (req.params.name === 'notes_list' || req.params.name === 'note_add' || req.params.name === 'note_done') {
+    if (!turn?.senderId) return fail('notes are only available while answering a Teams message')
+    try {
+      if (req.params.name === 'note_add') {
+        const note = addNote(STATE_DIR, turn.senderId, String(args.text ?? ''))
+        return ok(`noted #${note.id}`)
+      }
+      if (req.params.name === 'note_done') {
+        return doneNote(STATE_DIR, turn.senderId, Number(args.id)) ? ok(`note #${Number(args.id)} removed`) : fail('no such note: see notes_list')
+      }
+      return ok(formatNotes(listNotes(STATE_DIR, turn.senderId)))
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : 'notes failed')
+    }
   }
 
   if (req.params.name === 'make_pdf') {
@@ -486,6 +535,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       `msteams channel: outbound refused (${req.params.name}) for unknown conversation\n`,
     )
     return fail('refused: no inbound conversation on record for that conversation_id')
+  }
+
+  // Fork (05/11): a scheduled job answers its own person, in their own chat only.
+  if (turn?.scheduled && ref.conversationId !== turn.conversationId) {
+    process.stderr.write(`msteams channel: outbound refused (${req.params.name}): scheduled job, other conversation\n`)
+    return fail('refused: a scheduled job only answers in the chat it was started for')
   }
 
   const outbound = outboundAllowed(ref, loadAccess())
@@ -683,8 +738,11 @@ async function beginTurn(
   senderId: string,
   senderName: string | undefined,
   role: 'admin' | 'user',
+  scheduled?: TurnLock['scheduled'],
 ): Promise<boolean> {
   if (activeTurn && !isStale(activeTurn)) {
+    // A job finds the bot busy: no notice, it tries again on the next tick.
+    if (scheduled) return false
     await sendPlain(conversationId, formatBusyNotice(activeTurn, undefined, role), err =>
       process.stderr.write(`msteams channel: busy notice failed: ${err}\n`),
     )
@@ -692,7 +750,14 @@ async function beginTurn(
   }
   if (activeTurn) await endTurn(formatTimedOut(activeTurn))
 
-  const lock: TurnLock = { since: Date.now(), conversationId, senderId, role, ...(senderName ? { senderName } : {}) }
+  const lock: TurnLock = {
+    since: Date.now(),
+    conversationId,
+    senderId,
+    role,
+    ...(senderName ? { senderName } : {}),
+    ...(scheduled ? { scheduled } : {}),
+  }
   activeTurn = lock
   // Written once, before Claude is notified, so no Stop for this turn can run
   // first. The status message id stays in memory: rewriting the file after the
@@ -930,6 +995,69 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Fork (05/11): scheduled jobs. See src/schedule.ts.
+// ---------------------------------------------------------------------------
+
+let scheduling = false
+const scheduleErrorsSeen = new Set<string>()
+
+/** Start the next job that is due, if the bot is free. Called every 30 seconds. */
+async function runScheduledJobs(now = Date.now()): Promise<void> {
+  if (scheduling || !teamsApp || (activeTurn && !isStale(activeTurn))) return
+  scheduling = true
+  try {
+    const { jobs, errors } = readSchedules(STATE_DIR)
+    for (const e of errors) {
+      if (scheduleErrorsSeen.has(e)) continue
+      scheduleErrorsSeen.add(e)
+      process.stderr.write(`msteams channel: schedules.json: ${e}\n`)
+    }
+    // One at a time: the next one starts on a later tick, once this turn ends.
+    const job = dueJobs(jobs, readRan(STATE_DIR), now)[0]
+    if (job) await startJob(job, now)
+  } catch (err) {
+    process.stderr.write(`msteams channel: scheduled job failed: ${err}\n`)
+  } finally {
+    scheduling = false
+  }
+}
+
+async function startJob(job: Job, now: number): Promise<void> {
+  const day = vnClock(now).day
+  const access = loadAccess()
+  // The same outbound gate as a reply: the person's own 1:1 chat with the bot,
+  // on record and still allowed.
+  const ref = conversations.list().find(r => r.conversationType === 'personal' && r.senderId === job.user)
+  const refused = !ref ? 'no 1:1 chat with the bot on record' : outboundAllowed(ref, access).allowed ? '' : 'no longer allowed'
+  if (refused || !ref) {
+    markRan(STATE_DIR, job.id, day)
+    process.stderr.write(`msteams channel: scheduled job ${job.id} skipped: ${refused}\n`)
+    return
+  }
+  const role = effectiveRole(roleOf(access, job.user), job.user, readViewAs(STATE_DIR))
+  if (!(await beginTurn(ref.conversationId, job.user, undefined, role, job.kind))) return
+  // Marked before Claude is told, so a crash mid-job never runs it twice.
+  markRan(STATE_DIR, job.id, day)
+  process.stderr.write(`msteams channel: scheduled job ${job.id} started\n`)
+  void mcp
+    .notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: jobPrompt(job.kind, now),
+        meta: {
+          conversation_id: ref.conversationId,
+          conversation_type: 'personal',
+          user_id: job.user,
+          role,
+          scheduled: job.kind,
+          ts: new Date(now).toISOString(),
+        },
+      },
+    })
+    .catch(err => process.stderr.write(`msteams channel: failed to deliver scheduled job to Claude: ${err}\n`))
+}
+
 if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
   // Serve MCP anyway: the plugin still loads as a channel, so Claude can tell
   // the operator what is missing and point at /msteams:configure. Only the
@@ -1030,6 +1158,9 @@ if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
       )
     }
   }, 1000).unref()
+
+  // Fork (05/11): scheduled jobs, checked twice a minute.
+  setInterval(() => void runScheduledJobs(), 30_000).unref()
 
   await app.start(WEBHOOK_PORT)
 

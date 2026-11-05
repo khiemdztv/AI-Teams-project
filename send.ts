@@ -108,9 +108,37 @@ if (process.argv.includes('--list')) {
   process.exit(0)
 }
 
+if (process.argv.includes('--admins')) {
+  // Fork (05/11): an operator notice (the health check) to every admin's 1:1
+  // chat with the bot, text only, through the same two-part outbound gate.
+  const notice = (flag('text') ?? (!process.stdin.isTTY ? await Bun.stdin.text() : '')).trim()
+  if (!notice) die(1, 'nothing to send: pass --text or pipe the message on stdin')
+  const { MSTEAMS_APP_ID: id, MSTEAMS_APP_PASSWORD: password, MSTEAMS_TENANT_ID: tenant } = process.env
+  if (!id || !password || !tenant) die(2, `msteams is not configured — set credentials in ${join(STATE_DIR, '.env')}`)
+  const access = readAccess(STATE_DIR)
+  const admins = (access.admins ?? []).map(a => a.trim().toLowerCase())
+  // Without an admins list everyone allowed is an admin (src/gate.ts roleOf).
+  const targets = conversations
+    .list()
+    .filter(r => r.conversationType === 'personal' && r.senderId && (!access.admins || admins.includes(r.senderId)))
+    .filter(r => outboundAllowed(r, access).allowed)
+  if (!targets.length) die(3, 'refused: no admin has a 1:1 chat with the bot on record')
+  const app = new App({ clientId: id, clientSecret: password, tenantId: tenant })
+  let failed = 0
+  for (const r of targets) {
+    try {
+      await app.send(r.conversationId, { type: 'message', text: notice, textFormat: 'plain' } as any)
+    } catch (err) {
+      failed++
+      process.stderr.write(`send to an admin failed: ${err instanceof Error ? err.message : err}\n`)
+    }
+  }
+  process.exit(failed === targets.length ? 4 : 0)
+}
+
 const conversationId = idFlag('conversation')
 if (!conversationId) {
-  die(1, 'usage: bun send.ts --conversation <id> [--text <message>] [--files <path>] [--thread <thread_id>]\n       bun send.ts --list')
+  die(1, 'usage: bun send.ts --conversation <id> [--text <message>] [--files <path>] [--thread <thread_id>]\n       bun send.ts --admins [--text <message>]\n       bun send.ts --list')
 }
 
 const files = pathFlags('files')
