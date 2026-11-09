@@ -95,12 +95,13 @@ describe('channel registration', () => {
 })
 
 describe('tool surface', () => {
-  test('exactly the four MVP tools, plus the fork make_pdf, log_internal and notes tools, are exposed', () => {
+  test('exactly the four MVP tools, plus the fork make_pdf, make_video, log_internal and notes tools, are exposed', () => {
     expect(tools.map(t => t.name).sort()).toEqual([
       'download_attachment',
       'edit_message',
       'log_internal',
       'make_pdf',
+      'make_video',
       'note_add',
       'note_done',
       'notes_list',
@@ -121,8 +122,8 @@ describe('tool surface', () => {
   test('every conversation-addressed tool takes conversation_id', () => {
     // That parameter is what the outbound gate looks up; a tool without it
     // would be reaching Teams without passing the gate at all.
-    // log_internal and the notes tools write local files and address no conversation.
-    const local = ['download_attachment', 'make_pdf', 'log_internal', 'notes_list', 'note_add', 'note_done']
+    // make_video, log_internal and the notes tools write local files and address no conversation.
+    const local = ['download_attachment', 'make_pdf', 'make_video', 'log_internal', 'notes_list', 'note_add', 'note_done']
     for (const tool of tools.filter(t => !local.includes(t.name))) {
       expect(tool.inputSchema.required).toContain('conversation_id')
     }

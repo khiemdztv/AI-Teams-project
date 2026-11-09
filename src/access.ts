@@ -70,6 +70,7 @@ export function readAccess(dir: string): Access {
       mentionPatterns: parsed.mentionPatterns,
       // Fork: kept only when it is a list, so a typo cannot make everyone a user.
       ...(Array.isArray(parsed.admins) ? { admins: parsed.admins.map(String) } : {}),
+      ...(Array.isArray(parsed.limitedAdmins) ? { limitedAdmins: parsed.limitedAdmins.map(String) } : {}),
     }
   } catch {
     try {

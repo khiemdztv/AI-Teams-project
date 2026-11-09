@@ -103,7 +103,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'mail_list_messages',
       description:
-        'List emails in the Teams sender\'s own Outlook mailbox, across all folders by default, newest first: date, the folder each one is in, sender, subject, preview and message_id. When summarising, say which folder each email is in. Read-only; messages stay unread. Dates: "today", "yesterday", "today-7", "YYYY-MM-DD" (Vietnam time) or an ISO time; since defaults to today-7.',
+        'List emails in the Teams sender\'s own Outlook mailbox, across all folders by default, newest first: date, the folder each one is in, sender, subject, preview and message_id. When summarising, say which folder each email is in. Read-only; messages stay unread. Dates: "today", "yesterday", "tomorrow", "today-7", "today+1", "YYYY-MM-DD" (Vietnam time) or an ISO time; since defaults to today-7.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -179,7 +179,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'calendar_list_events',
       description:
-        'The sender\'s own Outlook calendar, Vietnam time: time, subject, place, organizer, attendees and their answers, the Teams link. Dates: "today", "yesterday", "today-7", "YYYY-MM-DD" or an ISO time; since defaults to today, until to 7 days after since.',
+        'The sender\'s own Outlook calendar, Vietnam time: time, subject, place, organizer, attendees and their answers, the Teams link. Dates: "today", "yesterday", "tomorrow", "today-7", "today+1", "YYYY-MM-DD" or an ISO time; since defaults to today, until to 7 days after since.',
       inputSchema: {
         type: 'object',
         properties: { since: { type: 'string' }, until: { type: 'string' }, top: { type: 'number', description: '1-50, default 25' } },

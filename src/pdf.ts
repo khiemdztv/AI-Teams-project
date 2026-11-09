@@ -40,7 +40,7 @@ export type PdfContent = {
   images?: string[]
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
 
@@ -49,7 +49,7 @@ function inline(s: string): string {
   return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 }
 
-function textToHtml(text: string): string {
+export function textToHtml(text: string): string {
   const out: string[] = []
   for (const block of text.replace(/\r\n?/g, '\n').split(/\n\s*\n/)) {
     const lines = block.split('\n').filter(l => l.trim())
@@ -81,6 +81,16 @@ function textToHtml(text: string): string {
   return out.join('\n')
 }
 
+/** An image from an allowed folder as a data: URI; also used by src/video.ts. */
+export function embedImage(path: string, imageRoots: string[]): string {
+  assertWithinAnyRoot(path, imageRoots)
+  if (statSync(path).size > MAX_PDF_IMAGE_BYTES) throw new Error(`${basename(path)} is larger than 20MB`)
+  const bytes = readFileSync(path)
+  const mime = IMAGE_MIME[sniffImageExt(bytes) ?? '']
+  if (!mime) throw new Error(`${basename(path)} is not a PNG, JPEG, GIF, WebP or BMP image`)
+  return `data:${mime};base64,${bytes.toString('base64')}`
+}
+
 /** The whole HTML page for `content`. Images are read and checked here. */
 export function buildPdfHtml(content: PdfContent, imageRoots: string[]): string {
   const text = content.text ?? ''
@@ -89,14 +99,7 @@ export function buildPdfHtml(content: PdfContent, imageRoots: string[]): string 
   if (images.length > MAX_PDF_IMAGES) throw new Error(`at most ${MAX_PDF_IMAGES} images`)
   if (!content.title && !text.trim() && !images.length) throw new Error('nothing to put in the PDF')
 
-  const figures = images.map(path => {
-    assertWithinAnyRoot(path, imageRoots)
-    if (statSync(path).size > MAX_PDF_IMAGE_BYTES) throw new Error(`${basename(path)} is larger than 20MB`)
-    const bytes = readFileSync(path)
-    const mime = IMAGE_MIME[sniffImageExt(bytes) ?? '']
-    if (!mime) throw new Error(`${basename(path)} is not a PNG, JPEG, GIF, WebP or BMP image`)
-    return `<figure><img src="data:${mime};base64,${bytes.toString('base64')}"></figure>`
-  })
+  const figures = images.map(path => `<figure><img src="${embedImage(path, imageRoots)}"></figure>`)
 
   const title = content.title ? escapeHtml(content.title) : ''
   return `<!doctype html>

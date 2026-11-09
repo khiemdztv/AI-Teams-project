@@ -76,6 +76,13 @@ export type Access = {
    * allowlisted sender is an admin, which is how the bot behaved before.
    */
   admins?: string[]
+  /**
+   * Fork addition (06/11): lowercased AAD object ids answered like admins
+   * (technical detail, health notices) who approve nothing: a permission
+   * prompt raised for their message goes to `admins`, and they are never asked
+   * about anyone else's. Only meaningful alongside `admins`.
+   */
+  limitedAdmins?: string[]
 }
 
 export type Role = 'admin' | 'user'
@@ -83,7 +90,16 @@ export type Role = 'admin' | 'user'
 /** Fork addition: `senderId`'s role. Only meaningful for a sender who passed the gate. */
 export function roleOf(access: Access, senderId: string): Role {
   if (!access.admins) return 'admin'
-  return access.admins.some(id => normalizeSenderId(id) === normalizeSenderId(senderId)) ? 'admin' : 'user'
+  return listed(access.admins, senderId) || listed(access.limitedAdmins, senderId) ? 'admin' : 'user'
+}
+
+/** Fork addition (06/11): whether `senderId` answers permission prompts. Limited admins do not. */
+export function canApprove(access: Access, senderId: string): boolean {
+  return !access.admins || listed(access.admins, senderId)
+}
+
+function listed(ids: string[] | undefined, senderId: string): boolean {
+  return !!ids?.some(id => normalizeSenderId(id) === normalizeSenderId(senderId))
 }
 
 export const DEFAULT_ACCESS: Access = {

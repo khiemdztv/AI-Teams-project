@@ -12,7 +12,7 @@ import {
   PAIRING_TTL_MS,
   MAX_PENDING,
 } from '../src/access.js'
-import { DEFAULT_ACCESS, roleOf, type Access } from '../src/gate.js'
+import { DEFAULT_ACCESS, roleOf, canApprove, type Access } from '../src/gate.js'
 
 let dir: string
 beforeEach(() => {
@@ -195,5 +195,27 @@ describe('admins (fork, 02/11)', () => {
     expect(roleOf(a, 'a')).toBe('admin')
     expect(roleOf(a, 'b')).toBe('user')
     expect(roleOf({ ...fresh(), allowFrom: ['b'] }, 'b')).toBe('admin')
+  })
+})
+
+describe('limited admins (fork, 06/11)', () => {
+  test('a limitedAdmins list survives a read; anything else is dropped', () => {
+    writeFileSync(join(dir, 'access.json'), JSON.stringify({ ...fresh(), allowFrom: ['a', 'n'], admins: ['a'], limitedAdmins: ['n'] }))
+    expect(readAccess(dir).limitedAdmins).toEqual(['n'])
+    writeFileSync(join(dir, 'access.json'), JSON.stringify({ ...fresh(), allowFrom: ['n'], admins: ['a'], limitedAdmins: 'n' }))
+    expect(readAccess(dir).limitedAdmins).toBeUndefined()
+  })
+
+  test('a limited admin is answered as an admin but approves nothing', () => {
+    const a: Access = { ...fresh(), allowFrom: ['a', 'N', 'b'], admins: ['a'], limitedAdmins: ['N'] }
+    expect(roleOf(a, 'n')).toBe('admin')
+    expect(canApprove(a, 'n')).toBe(false)
+    expect(canApprove(a, 'a')).toBe(true)
+    expect(roleOf(a, 'b')).toBe('user')
+    expect(canApprove(a, 'b')).toBe(false)
+  })
+
+  test('without an admins list everyone approves, as before', () => {
+    expect(canApprove({ ...fresh(), allowFrom: ['b'], limitedAdmins: ['b'] }, 'b')).toBe(true)
   })
 })

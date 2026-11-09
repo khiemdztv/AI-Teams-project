@@ -585,6 +585,21 @@ describe('reading the sender\'s own mailbox', () => {
     expect(parseWhen('2026-10-01', NOW, true)).toBe('2026-10-01T17:00:00.000Z')
     expect(() => parseWhen('tomorrow-ish', NOW, false)).toThrow(/not a date/)
   })
+
+  // 09/11: Date.parse read these as days in 2001, or 10/11 as 11 October.
+  test('days ahead are understood; anything Date.parse would guess at is refused', () => {
+    expect(parseWhen('tomorrow', NOW, false)).toBe('2026-10-29T17:00:00.000Z')
+    expect(parseWhen('tomorrow', NOW, true)).toBe('2026-10-30T17:00:00.000Z')
+    expect(parseWhen('today+1', NOW, false)).toBe(parseWhen('tomorrow', NOW, false))
+    expect(parseWhen('today+3', NOW, true)).toBe('2026-11-01T17:00:00.000Z')
+    expect(parseWhen('2026-11-10T14:00', NOW, false)).toBe('2026-11-10T07:00:00.000Z')
+    expect(parseWhen('2026-11-10 14:00', NOW, false)).toBe('2026-11-10T07:00:00.000Z')
+    expect(parseWhen('2026-11-06T17:00:00+07:00', NOW, false)).toBe('2026-11-06T10:00:00.000Z')
+    expect(parseWhen('2026-11-06T10:00:00Z', NOW, false)).toBe('2026-11-06T10:00:00.000Z')
+    for (const bad of ['10/11/2026', 'thứ 6', 'next friday', '14:00', 'today+', '2026-13-01']) {
+      expect(() => parseWhen(bad, NOW, false)).toThrow(/not a date/)
+    }
+  })
   // Inbox and Sent at the top, the user's own "Boss" with a "2026" inside it.
   const FOLDERS = {
     'GET /me/mailFolders?': () => ({

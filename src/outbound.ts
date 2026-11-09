@@ -29,6 +29,7 @@ import {
   type Attachment,
 } from './attach.js'
 import { buildFileConsentCard } from './file-consent.js'
+import { buildLinkCard, type LinkButton } from './link-buttons.js'
 import type { PendingUploadStore } from './pending-uploads.js'
 import {
   describeSharePointFailure,
@@ -176,6 +177,12 @@ function extLower(name: string): string {
 export type DeliveryResult = {
   /** Ids of everything Teams accepted, in send order. */
   sentIds: string[]
+  /**
+   * How many messages Teams accepted, id or not: a message carrying an
+   * Adaptive Card comes back without one (seen 09/11 with link buttons), and
+   * counting ids alone reported that as nothing sent.
+   */
+  sent: number
   /** Files now sitting in the chat as consent cards, awaiting Accept. */
   offered: string[]
   /** Set when delivery stopped partway; `after` counts what already landed. */
@@ -186,6 +193,8 @@ export type DeliverParams = {
   text: string
   /** Teams renders markdown by default; 'plain' is for text that must appear literally. */
   textFormat?: 'markdown' | 'plain'
+  /** "Open" buttons, carried by the last text message (fork, 09/11). */
+  links?: LinkButton[]
   plan: OutboundFilePlan[]
   conversationId: string
   post: (activity: Record<string, unknown>) => Promise<{ id?: string } | undefined>
@@ -213,8 +222,12 @@ export async function deliverOutbound(p: DeliverParams): Promise<DeliveryResult>
   // chunkText('') would return one empty chunk, and Teams would show an empty
   // message above the files.
   const chunks = p.text.trim() ? chunkText(p.text) : []
-  const parts = chunks.length + p.plan.length
+  const links = p.links ?? []
+  // With no text the buttons are a message of their own.
+  const cardAlone = links.length > 0 && chunks.length === 0
+  const parts = chunks.length + p.plan.length + (cardAlone ? 1 : 0)
   const sentIds: string[] = []
+  let landed = 0
   const offered: string[] = []
 
   try {
@@ -233,12 +246,20 @@ export async function deliverOutbound(p: DeliverParams): Promise<DeliveryResult>
       }
     }
 
-    for (const chunk of chunks) {
+    for (const [i, chunk] of chunks.entries()) {
+      const last = i === chunks.length - 1
       const sent = await p.post({
         type: 'message',
         text: chunk,
         textFormat: p.textFormat ?? 'markdown',
+        ...(last && links.length ? { attachments: [buildLinkCard(links)] } : {}),
       })
+      landed++
+      if (sent?.id) sentIds.push(String(sent.id))
+    }
+    if (cardAlone) {
+      const sent = await p.post({ type: 'message', attachments: [buildLinkCard(links)] })
+      landed++
       if (sent?.id) sentIds.push(String(sent.id))
     }
 
@@ -247,6 +268,7 @@ export async function deliverOutbound(p: DeliverParams): Promise<DeliveryResult>
       // Attachments follow the text as their own activities, matching the
       // telegram plugin — Teams renders an image with a caption inconsistently.
       const sent = await p.post({ type: 'message', attachments: [entry.attachment] })
+      landed++
       if (sent?.id) sentIds.push(String(sent.id))
     }
 
@@ -268,6 +290,7 @@ export async function deliverOutbound(p: DeliverParams): Promise<DeliveryResult>
           fetchFn: transport.fetchFn,
           log: p.log,
         })
+        landed++
         if (sentId) sentIds.push(sentId)
       } catch (err) {
         throw new Error(describeSharePointFailure(err))
@@ -307,10 +330,10 @@ export async function deliverOutbound(p: DeliverParams): Promise<DeliveryResult>
     p.log?.(`outbound delivery failed: ${detail}`)
     // A posted consent card landed as much as a sent message did, so it counts
     // toward what the recipient has already seen.
-    return { sentIds, offered, failed: { after: sentIds.length + offered.length, of: parts, detail } }
+    return { sentIds, sent: landed, offered, failed: { after: landed + offered.length, of: parts, detail } }
   }
 
-  return { sentIds, offered }
+  return { sentIds, sent: landed, offered }
 }
 
 /**
@@ -337,12 +360,14 @@ export function describeFailure(
  * anything waiting for it would wait forever.
  */
 export function describeDelivery(result: DeliveryResult): string {
-  const ids = result.sentIds.join(', ') || 'unknown'
+  const ids = result.sentIds.join(', ')
   const sent =
-    result.sentIds.length === 1 ? `sent (id: ${ids})` : `sent ${result.sentIds.length} parts (ids: ${ids})`
+    result.sent === 1
+      ? ids ? `sent (id: ${ids})` : 'sent (Teams returned no id)'
+      : `sent ${result.sent} parts` + (ids ? ` (ids: ${ids})` : ' (Teams returned no ids)')
   if (!result.offered.length) return sent
   const offered =
     `offered ${result.offered.join(', ')} — awaiting Accept in Teams. Offered is terminal: no ` +
     `event fires either way, so do not wait or retry.`
-  return result.sentIds.length ? `${sent}; ${offered}` : offered
+  return result.sent ? `${sent}; ${offered}` : offered
 }

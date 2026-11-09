@@ -405,22 +405,27 @@ describe('deliverOutbound', () => {
 })
 
 describe('describeDelivery', () => {
+  test('a message Teams accepted without an id still counts as sent', () => {
+    expect(describeDelivery({ sentIds: [], sent: 1, offered: [] })).toBe('sent (Teams returned no id)')
+    expect(describeDelivery({ sentIds: ['a'], sent: 2, offered: [] })).toBe('sent 2 parts (ids: a)')
+  })
+
   test('one part reads as one message', () => {
-    expect(describeDelivery({ sentIds: ['a'], offered: [] })).toBe('sent (id: a)')
+    expect(describeDelivery({ sentIds: ['a'], sent: 1, offered: [] })).toBe('sent (id: a)')
   })
 
   test('several parts list their ids', () => {
-    expect(describeDelivery({ sentIds: ['a', 'b'], offered: [] })).toBe('sent 2 parts (ids: a, b)')
+    expect(describeDelivery({ sentIds: ['a', 'b'], sent: 2, offered: [] })).toBe('sent 2 parts (ids: a, b)')
   })
 
   test('an offer says plainly that nothing more will happen', () => {
-    const described = describeDelivery({ sentIds: ['a'], offered: ['report.pdf'] })
+    const described = describeDelivery({ sentIds: ['a'], sent: 1, offered: ['report.pdf'] })
 
     expect(described).toMatch(/offered report\.pdf/)
     expect(described).toMatch(/do not wait or retry/)
   })
 
   test('a file-only offer does not claim anything was sent', () => {
-    expect(describeDelivery({ sentIds: [], offered: ['report.pdf'] })).toStartWith('offered')
+    expect(describeDelivery({ sentIds: [], sent: 0, offered: ['report.pdf'] })).toStartWith('offered')
   })
 })

@@ -28,6 +28,7 @@ import {
   normalizeSenderId,
   normalizeConversationId,
   roleOf,
+  canApprove,
   type Access,
   type ConversationType,
 } from './src/gate.js'
@@ -58,6 +59,8 @@ import { stateDir } from './src/state.js'
 import { purgeOlderThan, INBOX_TTL_MS } from './src/purge.js'
 import { isOfficeFile, officeToText } from './src/office-text.js'
 import { buildPdfHtml, pdfFileName, printHtmlToPdf } from './src/pdf.js'
+import { parseLinkButtons } from './src/link-buttons.js'
+import { makeSlideVideo, videoFileName, MAX_VIDEO_SLIDES } from './src/video.js'
 import {
   type TurnLock,
   turnLockPath,
@@ -252,7 +255,10 @@ mcp.setNotificationHandler(
     const turn = activeTurn && !isStale(activeTurn) ? activeTurn : null
     const admins = access.admins ? new Set(access.admins.map(id => normalizeSenderId(id))) : undefined
     // The turn's role already counts /useransw; a lock without one predates roles.
-    const delegated = !!turn?.senderId && (turn.role ?? roleOf(access, turn.senderId)) === 'user'
+    // A limited admin is answered as an admin but approves nothing (06/11).
+    const delegated =
+      !!turn?.senderId &&
+      ((turn.role ?? roleOf(access, turn.senderId)) === 'user' || !canApprove(access, turn.senderId))
     const targets = permissionTargets(conversations.list(), allowed, turn?.senderId, admins, delegated)
 
     // Bind the request to exactly the people it is sent to: a verdict from
@@ -343,6 +349,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               'Absolute paths of files to attach, sent after the text (up to 10 per reply, 100MB each). Images under 4MB go inline. In a DM, anything else is offered as a consent card the recipient must Accept — the result reports it as offered, which is terminal: no event follows, so do not wait or retry. In channels and group chats those files are shared from SharePoint instead.',
           },
+          links: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { title: { type: 'string' }, url: { type: 'string' } },
+              required: ['url'],
+            },
+            description:
+              'Buttons under the text that open a web page in the sender\'s own browser when they click (up to 5, http or https only). You cannot open anything on the sender\'s machine yourself, so when they ask you to open, show or go to a website, answer with a button. title is the label, short (e.g. "Mở YouTube"); without it the site name is used.',
+          },
         },
         required: ['conversation_id'],
       },
@@ -388,6 +404,33 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           images: { type: 'array', items: { type: 'string' }, description: 'Absolute image paths, in order' },
         },
         required: ['file_name'],
+      },
+    },
+    {
+      // Fork addition (09/11): see src/video.ts.
+      name: 'make_video',
+      description:
+        'Make a slide video (MP4, 1280x720, no sound) in the export folder and return its path. Each slide is a title, text, one image and/or a caption bar along the bottom, shown for `seconds` (default from how much there is to read, 2 to 30), with a short fade between slides. Text follows make_pdf\'s rules (blank lines, "- " bullets, **bold**); keep it to a few lines a slide. Images: absolute paths from image_path, download_attachment or the export folder. Takes about 2 seconds a slide. Send the result as a OneDrive link (files_upload) rather than in the chat.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          file_name: { type: 'string', description: 'e.g. "gioi-thieu.mp4"; a name only, no folder' },
+          slides: {
+            type: 'array',
+            description: `1 to ${MAX_VIDEO_SLIDES} slides, in order`,
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                text: { type: 'string' },
+                image: { type: 'string', description: 'Absolute image path' },
+                caption: { type: 'string', description: 'Subtitle line along the bottom' },
+                seconds: { type: 'number' },
+              },
+            },
+          },
+        },
+        required: ['file_name', 'slides'],
       },
     },
     {
@@ -497,6 +540,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     }
   }
 
+  if (req.params.name === 'make_video') {
+    if (!SENDABLE_ROOT) return fail('the export folder is not set (MSTEAMS_SENDABLE_ROOT in .env)')
+    try {
+      const out = join(SENDABLE_ROOT, videoFileName(String(args.file_name ?? '')))
+      const seconds = await makeSlideVideo(args.slides, out, [INBOX_DIR, SENDABLE_ROOT])
+      return ok(`${out}\n${seconds} seconds`)
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : 'video failed')
+    }
+  }
+
   if (!teamsApp) return fail('msteams is not configured — no credentials in the state dir')
 
   // download_attachment addresses a file, not a conversation, and the handle it
@@ -595,7 +649,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   // carries the inbound tag's thread_id — see the tool description.
   const threadId = args.reply_to ? String(args.reply_to) : undefined
   const files = Array.isArray(args.files) ? args.files.map(String) : []
-  if (!text.trim() && files.length === 0) return fail('pass text, files, or both')
+  let links
+  try {
+    links = parseLinkButtons(args.links)
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err))
+  }
+  if (!text.trim() && files.length === 0 && links.length === 0) return fail('pass text, files, links, or a mix')
   if (files.length > 0 && !SENDABLE_ROOT) {
     return fail('file sending is disabled: MSTEAMS_SENDABLE_ROOT is not set in .env')
   }
@@ -621,6 +681,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const result = await deliverOutbound({
     text,
     textFormat,
+    links,
     plan,
     conversationId: ref.conversationId,
     post: activity =>

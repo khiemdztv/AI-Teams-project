@@ -116,7 +116,8 @@ if (process.argv.includes('--admins')) {
   const { MSTEAMS_APP_ID: id, MSTEAMS_APP_PASSWORD: password, MSTEAMS_TENANT_ID: tenant } = process.env
   if (!id || !password || !tenant) die(2, `msteams is not configured — set credentials in ${join(STATE_DIR, '.env')}`)
   const access = readAccess(STATE_DIR)
-  const admins = (access.admins ?? []).map(a => a.trim().toLowerCase())
+  // Limited admins get these notices too (06/11); they only approve nothing.
+  const admins = [...(access.admins ?? []), ...(access.limitedAdmins ?? [])].map(a => a.trim().toLowerCase())
   // Without an admins list everyone allowed is an admin (src/gate.ts roleOf).
   const targets = conversations
     .list()

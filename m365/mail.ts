@@ -127,21 +127,29 @@ function vnMidnight(now: number, days = 0): string {
 }
 
 /**
- * "today", "yesterday", "today-7", "2026-10-29" (a whole day, Vietnam time) or
- * a full ISO time, as a UTC ISO time. `end` makes a day mean its end.
+ * "today", "yesterday", "tomorrow", "today-7", "today+1", "2026-10-29" (a whole
+ * day, Vietnam time) or an ISO time ("2026-10-29T14:00", Vietnam time unless it
+ * carries a zone), as a UTC ISO time. `end` makes a day mean its end.
+ *
+ * Anything else is refused rather than handed to Date.parse, which reads
+ * "today+1" and "thứ 6" as days in 2001 and "10/11/2026" as 11 October (09/11).
  */
 export function parseWhen(raw: string, now: number, end: boolean): string {
-  const s = raw.trim().toLowerCase()
-  const rel = /^today(?:-(\d{1,3}))?$/.exec(s)
-  if (rel) return vnMidnight(now, -Number(rel[1] ?? 0) + (end ? 1 : 0))
+  const s = String(raw ?? '').trim().toLowerCase()
+  const rel = /^today(?:([+-])(\d{1,3}))?$/.exec(s)
+  if (rel) return vnMidnight(now, (rel[1] === '+' ? 1 : -1) * Number(rel[2] ?? 0) + (end ? 1 : 0))
   if (s === 'yesterday') return vnMidnight(now, end ? 0 : -1)
+  if (s === 'tomorrow') return vnMidnight(now, end ? 2 : 1)
+  const fail = () => new Error(`not a date: ${JSON.stringify(raw)} (use today, yesterday, tomorrow, today-7, today+1, YYYY-MM-DD or YYYY-MM-DDTHH:MM)`)
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const start = Date.parse(`${s}T00:00:00+07:00`)
-    if (Number.isNaN(start)) throw new Error(`not a date: ${raw}`)
+    if (Number.isNaN(start)) throw fail()
     return new Date(start + (end ? 86_400_000 : 0)).toISOString()
   }
-  const at = Date.parse(raw)
-  if (Number.isNaN(at)) throw new Error(`not a date: ${JSON.stringify(raw)} (use today, yesterday, today-7, YYYY-MM-DD)`)
+  const iso = /^(\d{4}-\d{2}-\d{2})[t ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(z|[+-]\d{2}:?\d{2})?$/.exec(s)
+  if (!iso) throw fail()
+  const at = Date.parse(`${iso[1]}T${iso[2]}${iso[3] ? iso[3].toUpperCase() : '+07:00'}`)
+  if (Number.isNaN(at)) throw fail()
   return new Date(at).toISOString()
 }
 
@@ -800,7 +808,9 @@ export class Mail {
   }): Promise<string> {
     const name = String(input.name ?? '').trim()
     if (!name) throw new Error('name is required')
-    const words = (list?: string[]) => (list ?? []).map(s => String(s).trim()).filter(Boolean)
+    // A single word given as a string, not a list, is still one condition (09/11: it crashed).
+    const words = (list?: string[] | string) =>
+      (Array.isArray(list) ? list : list ? [list] : []).map(s => String(s).trim()).filter(Boolean)
     const conditions: Record<string, unknown> = {}
     if (words(input.subject_contains).length) conditions.subjectContains = words(input.subject_contains)
     if (words(input.body_or_subject_contains).length) conditions.bodyOrSubjectContains = words(input.body_or_subject_contains)

@@ -249,6 +249,14 @@ describe('admins answer for non-admins (fork, 02/11)', () => {
     expect(permissionTargets(refs, allowed, 'boss').map(r => r.conversationId)).toEqual(['a:boss'])
   })
 
+  test("a limited admin's prompt goes to the admins, never to them (06/11)", () => {
+    // server.ts passes the admins only, with asUser set because canApprove is false
+    const withNick = [...refs, { conversationId: 'a:nick', conversationType: 'personal', senderId: 'nick' }]
+    const all = new Set([...allowed, 'nick'])
+    expect(permissionTargets(withNick, all, 'nick', admins, true).map(r => r.conversationId)).toEqual(['a:kien', 'a:sam'])
+    expect(permissionTargets(withNick, all, 'boss', admins).map(r => r.conversationId)).toEqual(['a:kien', 'a:sam'])
+  })
+
   test('an admin using /useransw is handled like a user: every admin is asked', () => {
     expect(permissionTargets(refs, allowed, 'sam', admins, true).map(r => r.conversationId)).toEqual(['a:kien', 'a:sam'])
   })
