@@ -85,6 +85,9 @@ import { graphTokenGetter } from './src/sharepoint.js'
 import { readSchedules, readRan, markRan, dueJobs, jobPrompt, vnClock, type Job } from './src/schedule.js'
 import { listNotes, addNote, doneNote, formatNotes } from './src/notes.js'
 import { MSTEAMS_SCHEDULED_TOOLS, SCHEDULED_REFUSAL } from './src/scheduled-guard.js'
+import { addWatch, stopWatch, readWatches, probeOutlook, checkWatches, WATCH_EVERY_MS } from './src/outlook-watch.js'
+import { loadConfig as loadM365Config } from './m365/config.js'
+import { UserAuths, tokenPath } from './m365/users.js'
 
 const STATE_DIR = stateDir()
 const INBOX_DIR = join(STATE_DIR, 'inbox')
@@ -481,6 +484,15 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['id'],
       },
     },
+    {
+      name: 'watch_outlook',
+      description:
+        'When the Teams sender asks to be told once Outlook (email or calendar) works again during a Microsoft outage: checks their mail and calendar now, and if they do not answer, keeps checking every 3 minutes with the sender\'s own sign-in and messages them in this chat as soon as both work again (gives up after 12 hours). Runs without you: do not set a cron job or loop for this, a scheduled turn has no sender and cannot read any mailbox. stop: true cancels the sender\'s watch.',
+      inputSchema: {
+        type: 'object',
+        properties: { stop: { type: 'boolean', description: 'Cancel the sender\'s watch' } },
+      },
+    },
   ],
 }))
 
@@ -552,6 +564,28 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 
   if (!teamsApp) return fail('msteams is not configured — no credentials in the state dir')
+
+  // Fork (13/11): see src/outlook-watch.ts. The sender and the chat come from
+  // the turn, never from arguments, and the later message passes the outbound
+  // gate again when it is sent.
+  if (req.params.name === 'watch_outlook') {
+    if (!turn?.senderId || !turn.conversationId) return fail('only while answering a Teams message')
+    try {
+      if (args.stop === true) {
+        return ok(stopWatch(STATE_DIR, turn.senderId) ? 'Stopped watching Outlook for the sender.' : 'Nothing was being watched for the sender.')
+      }
+      const ref = conversations.get(turn.conversationId)
+      if (!ref || !outboundAllowed(ref, loadAccess()).allowed) return fail('refused: this chat cannot be messaged later')
+      const probe = await probeOutlook(outlookToken(turn.senderId))
+      if (probe.ok) return ok(`Outlook answers now (${probe.detail}), so nothing is being watched. Tell the sender it works.`)
+      addWatch(STATE_DIR, turn.senderId, ref.conversationId)
+      return ok(
+        `Outlook does not answer now (${probe.detail}). Watching: checked every 3 minutes; the sender gets a message in this chat as soon as mail and calendar work again, or after 12 hours if they never do. Nothing else to set up.`,
+      )
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : 'watch failed')
+    }
+  }
 
   // download_attachment addresses a file, not a conversation, and the handle it
   // takes was only ever issued for an activity the inbound gate accepted — so
@@ -1119,6 +1153,52 @@ async function startJob(job: Job, now: number): Promise<void> {
     .catch(err => process.stderr.write(`msteams channel: failed to deliver scheduled job to Claude: ${err}\n`))
 }
 
+// ---------------------------------------------------------------------------
+// Fork (13/11): watching Outlook for a person during an outage. See
+// src/outlook-watch.ts.
+// ---------------------------------------------------------------------------
+
+let outlookAuths: UserAuths | undefined
+
+/** The person's own m365 sign-in, as the m365 server uses it. Throws when there is none. */
+function outlookToken(senderId: string): () => Promise<string> {
+  const config = loadM365Config()
+  if (!config.clientId || !config.tenantId) throw new Error('email is not set up on this machine (m365 .env)')
+  if (!existsSync(tokenPath(config.tokenDir, senderId))) {
+    throw new Error('the sender has not signed in their mailbox for the bot (bun m365/login.ts on the bot machine)')
+  }
+  outlookAuths ??= new UserAuths(config.clientId, config.tenantId, config.tokenDir)
+  const auth = outlookAuths.for(senderId)
+  return () => auth.accessToken()
+}
+
+let checkingOutlook = false
+
+/** Check every watch; message whoever's Outlook is back (or given up on). */
+async function runOutlookWatches(now = Date.now()): Promise<void> {
+  if (checkingOutlook || !teamsApp || !Object.keys(readWatches(STATE_DIR)).length) return
+  checkingOutlook = true
+  try {
+    const notices = await checkWatches(STATE_DIR, now, senderId => probeOutlook(outlookToken(senderId)))
+    for (const n of notices) {
+      // The same outbound gate as a reply, checked again now: access may have
+      // changed since the watch was asked for.
+      const ref = conversations.get(n.conversationId)
+      if (!ref || !outboundAllowed(ref, loadAccess()).allowed) {
+        process.stderr.write('msteams channel: outlook watch notice refused: conversation no longer allowed\n')
+        continue
+      }
+      await sendPlain(ref.conversationId, n.text, err =>
+        process.stderr.write(`msteams channel: outlook watch notice failed: ${err}\n`),
+      )
+    }
+  } catch (err) {
+    process.stderr.write(`msteams channel: outlook watch failed: ${err}\n`)
+  } finally {
+    checkingOutlook = false
+  }
+}
+
 if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
   // Serve MCP anyway: the plugin still loads as a channel, so Claude can tell
   // the operator what is missing and point at /msteams:configure. Only the
@@ -1222,6 +1302,8 @@ if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
 
   // Fork (05/11): scheduled jobs, checked twice a minute.
   setInterval(() => void runScheduledJobs(), 30_000).unref()
+  // Fork (13/11): Outlook watches, whether or not Claude is busy.
+  setInterval(() => void runOutlookWatches(), WATCH_EVERY_MS).unref()
 
   await app.start(WEBHOOK_PORT)
 

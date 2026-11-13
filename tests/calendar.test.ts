@@ -7,7 +7,7 @@ import { describe, expect, test, beforeEach } from 'bun:test'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { Calendar, parseLocalTime, VN_ZONE, MAX_INVITES_PER_HOUR } from '../m365/calendar.js'
+import { Calendar, parseLocalTime, parseLocalDate, VN_ZONE, MAX_INVITES_PER_HOUR } from '../m365/calendar.js'
 import { Files, UPLOAD_FOLDER } from '../m365/files.js'
 
 type Call = { method: string; url: string; body: any; headers: Headers }
@@ -166,6 +166,204 @@ describe('setting up a meeting', () => {
     const plan = /plan_id: (\S+)/.exec(await cal.prepareEvent(ask))![1]!
     await expect(cal.createEvent({ plan_id: plan, expect_attendees: ask.attendees, expect_start: ask.start })).rejects.toThrow(/last hour/)
     expect(g.calls).toHaveLength(0)
+  })
+})
+
+describe('entry options (10/11)', () => {
+  const created = () => fakeGraph({ 'POST /me/events': () => ({ status: 201, json: EVENT }) })
+
+  test('a day out of office: all day, shown as oof, no Teams link, no invitations', async () => {
+    const g = created()
+    const cal = calendar(g.fetchImpl)
+    const out = await cal.prepareEvent({ subject: 'Out of Office', start: '2026-11-13', all_day: true, show_as: 'oof', body: 'Tôi nghỉ' })
+    expect(out).toContain('when: 2026-11-13, all day')
+    expect(out).toContain('shown as: Out of office')
+    expect(out).toContain('Teams meeting link: no')
+    const plan = /plan_id: (\S+)/.exec(out)![1]!
+    await cal.createEvent({ plan_id: plan, expect_start: '2026-11-13' })
+    const body = g.calls[0]!.body
+    expect(body.isAllDay).toBe(true)
+    expect(body.showAs).toBe('oof')
+    expect(body.start).toEqual({ dateTime: '2026-11-13T00:00:00', timeZone: VN_ZONE })
+    expect(body.end).toEqual({ dateTime: '2026-11-14T00:00:00', timeZone: VN_ZONE })
+    expect(body.isOnlineMeeting).toBe(false)
+    expect(body.attendees).toEqual([])
+  })
+
+  test('several days end at the midnight after the last one', async () => {
+    const out = await calendar(fakeGraph({}).fetchImpl).prepareEvent({ subject: 'Nghỉ phép', start: '2026-11-13', end: '2026-11-17', all_day: true })
+    expect(out).toContain('when: 2026-11-13 to 2026-11-17, all day')
+    await expect(calendar(fakeGraph({}).fetchImpl).prepareEvent({ subject: 'x', start: '2026-11-13', end: '2026-11-12', all_day: true })).rejects.toThrow(/before/)
+    await expect(calendar(fakeGraph({}).fetchImpl).prepareEvent({ subject: 'x', start: '2026-10-29', all_day: true })).rejects.toThrow(/past/)
+  })
+
+  test('reminder, privacy, importance and repetition reach Graph', async () => {
+    const g = created()
+    const cal = calendar(g.fetchImpl)
+    const out = await cal.prepareEvent({
+      subject: 'Giao ban',
+      start: '2026-11-02 08:30',
+      duration_minutes: 30,
+      reminder_minutes: 0,
+      sensitivity: 'private',
+      importance: 'high',
+      repeat: 'weekdays',
+      repeat_until: '2026-12-31',
+    })
+    expect(out).toContain('reminder: none')
+    expect(out).toContain('repeats: every weekday (Mon–Fri), until 2026-12-31')
+    await cal.createEvent({ plan_id: /plan_id: (\S+)/.exec(out)![1]!, expect_start: '2026-11-02 08:30' })
+    const body = g.calls[0]!.body
+    expect(body.isReminderOn).toBe(false)
+    expect(body.sensitivity).toBe('private')
+    expect(body.importance).toBe('high')
+    expect(body.recurrence.pattern.daysOfWeek).toEqual(['monday', 'tuesday', 'wednesday', 'thursday', 'friday'])
+    expect(body.recurrence.range).toEqual({ type: 'endDate', startDate: '2026-11-02', endDate: '2026-12-31', recurrenceTimeZone: VN_ZONE })
+  })
+
+  test('a weekly or monthly repeat follows the first day; a repeat needs an end', async () => {
+    const g = created()
+    const cal = calendar(g.fetchImpl)
+    // 2026-11-04 is a Wednesday.
+    const weekly = await cal.prepareEvent({ subject: 'x', start: '2026-11-04 09:00', repeat: 'weekly', repeat_count: 4 })
+    await cal.createEvent({ plan_id: /plan_id: (\S+)/.exec(weekly)![1]!, expect_start: '2026-11-04 09:00' })
+    expect(g.calls[0]!.body.recurrence.pattern.daysOfWeek).toEqual(['wednesday'])
+    expect(g.calls[0]!.body.recurrence.range.numberOfOccurrences).toBe(4)
+    await expect(cal.prepareEvent({ subject: 'x', start: '2026-11-04 09:00', repeat: 'monthly' })).rejects.toThrow(/repeat_until/)
+    await expect(cal.prepareEvent({ subject: 'x', start: '2026-11-04 09:00', show_as: 'away' })).rejects.toThrow(/show_as must be one of/)
+  })
+
+  test('dates are read strictly', () => {
+    expect(parseLocalDate('2026-11-13')).toBe('2026-11-13')
+    expect(parseLocalDate('2026-11-13 09:00')).toBe('2026-11-13')
+    for (const bad of ['13/11', '2026-02-30', 'friday']) expect(() => parseLocalDate(bad)).toThrow(/not a date/)
+  })
+})
+
+describe('changing an existing entry (10/11)', () => {
+  const MINE = { ...EVENT, isOrganizer: true, organizer: { emailAddress: { address: 'sam@fabrikam.com' } } }
+  const OOF = {
+    id: 'AAMkOOF=',
+    subject: 'Out of Office',
+    start: { dateTime: '2026-11-13T00:00:00.0000000', timeZone: VN_ZONE },
+    end: { dateTime: '2026-11-14T00:00:00.0000000', timeZone: VN_ZONE },
+    isAllDay: true,
+    showAs: 'oof',
+    attendees: [],
+    isOrganizer: true,
+  }
+
+  /** A calendar whose list holds `event`, so it has a short event_id. */
+  async function withEvent(event: any) {
+    const g = fakeGraph({
+      'GET /me/calendarView': () => ({ json: { value: [event] } }),
+      'GET /me/events/': () => ({ json: event }),
+      'PATCH /me/events/': call => ({ json: { ...event, ...call.body } }),
+    })
+    const cal = calendar(g.fetchImpl)
+    const listed = await cal.listEvents({ since: '2026-11-01', until: '2026-11-30' })
+    const eventId = /event_id: (\S+)/.exec(listed)![1]!
+    return { g, cal, eventId }
+  }
+
+  test('moving a meeting keeps its length, shows who is told, and patches only on step 2', async () => {
+    const { g, cal, eventId } = await withEvent(MINE)
+    const out = await cal.prepareUpdate({ event_id: eventId, start: '2026-11-03 14:00' })
+    expect(out).toContain('Nothing has been changed yet')
+    expect(out).toContain('when: 2026-11-02 09:00–10:00 → 2026-11-03 14:00–15:00')
+    expect(out).toContain('Saving sends an update to: sam@fabrikam.com')
+    expect(g.calls.some(c => c.method === 'PATCH')).toBe(false)
+    const plan = /plan_id: (\S+)/.exec(out)![1]!
+    await expect(cal.updateEvent({ plan_id: plan, expect_subject: 'Họp khác' })).rejects.toThrow(/refused/)
+    const done = await cal.updateEvent({ plan_id: plan, expect_subject: 'Họp vụ việc ABC' })
+    expect(done).toContain('an update was sent')
+    const patch = g.calls.find(c => c.method === 'PATCH')!.body
+    expect(patch.start).toEqual({ dateTime: '2026-11-03T14:00:00', timeZone: VN_ZONE })
+    expect(patch.end).toEqual({ dateTime: '2026-11-03T15:00:00', timeZone: VN_ZONE })
+    expect(patch.subject).toBeUndefined()
+    await expect(cal.updateEvent({ plan_id: plan, expect_subject: 'Họp vụ việc ABC' })).rejects.toThrow(/unknown or expired/)
+  })
+
+  test('an all-day entry moves by days and its description can be replaced', async () => {
+    const { g, cal, eventId } = await withEvent(OOF)
+    const out = await cal.prepareUpdate({ event_id: eventId, start: '2026-11-16', end: '2026-11-17', body: 'Nghỉ phép' })
+    expect(out).toContain('when: 2026-11-13, all day → 2026-11-16 to 2026-11-17, all day')
+    expect(out).toContain('Nobody else is notified.')
+    await cal.updateEvent({ plan_id: /plan_id: (\S+)/.exec(out)![1]!, expect_subject: 'Out of Office' })
+    const patch = g.calls.find(c => c.method === 'PATCH')!.body
+    expect(patch.start).toEqual({ dateTime: '2026-11-16T00:00:00', timeZone: VN_ZONE })
+    expect(patch.end).toEqual({ dateTime: '2026-11-18T00:00:00', timeZone: VN_ZONE })
+    expect(patch.isAllDay).toBe(true)
+    expect(patch.body).toEqual({ contentType: 'text', content: 'Nghỉ phép' })
+  })
+
+  test('attendees are added and removed against the current list', async () => {
+    const { g, cal, eventId } = await withEvent(MINE)
+    const out = await cal.prepareUpdate({ event_id: eventId, add_attendees: ['client@example.com'], remove_attendees: ['sam@fabrikam.com'] })
+    expect(out).toContain('attendees removed (they get a cancellation): sam@fabrikam.com')
+    expect(out).toContain('EXTERNAL attendees added (outside the firm): client@example.com')
+    await cal.updateEvent({ plan_id: /plan_id: (\S+)/.exec(out)![1]!, expect_subject: 'Họp vụ việc ABC' })
+    expect(g.calls.find(c => c.method === 'PATCH')!.body.attendees).toEqual([{ type: 'required', emailAddress: { address: 'client@example.com' } }])
+    await expect(cal.prepareUpdate({ event_id: eventId, remove_attendees: ['ghost@fabrikam.com'] })).rejects.toThrow(/not invited/)
+  })
+
+  test("someone else's meeting: only show_as and reminder, and nobody is told", async () => {
+    const theirs = { ...EVENT, isOrganizer: false, organizer: { emailAddress: { address: 'kien.do@fabrikam.com' } } }
+    const { cal, eventId } = await withEvent(theirs)
+    await expect(cal.prepareUpdate({ event_id: eventId, start: '2026-11-03 09:00' })).rejects.toThrow(/kien.do@fabrikam.com organised/)
+    const out = await cal.prepareUpdate({ event_id: eventId, show_as: 'tentative', reminder_minutes: 30 })
+    expect(out).toContain('shown as: Busy → Tentative')
+    expect(out).toContain('reminder: 30 minutes before')
+    expect(out).toContain('Nobody else is notified.')
+  })
+
+  test('nothing to change is said, not sent', async () => {
+    const { cal, eventId } = await withEvent(OOF)
+    await expect(cal.prepareUpdate({ event_id: eventId })).rejects.toThrow(/nothing to change/)
+    await expect(cal.prepareUpdate({ event_id: eventId, show_as: 'oof' })).rejects.toThrow(/nothing would change/)
+  })
+})
+
+describe('automatic replies (10/11)', () => {
+  const graph = () =>
+    fakeGraph({
+      'GET /me/mailboxSettings/automaticRepliesSetting': () => ({ json: { status: 'disabled' } }),
+      'PATCH /me/mailboxSettings': () => ({ status: 200, json: {} }),
+    })
+
+  test('prepare changes nothing; set applies whole days in Vietnam time', async () => {
+    const g = graph()
+    const cal = calendar(g.fetchImpl)
+    const out = await cal.prepareAutoReply({ start: '2026-11-13', end: '2026-11-13', message: 'Tôi nghỉ <thứ Sáu>\nViệc gấp gọi văn phòng' })
+    expect(out).toContain('Nothing has been changed yet')
+    expect(out).toContain('now: automatic replies disabled')
+    expect(out).toContain('from 2026-11-13 00:00 to 2026-11-14 00:00')
+    expect(g.calls.map(c => c.method)).toEqual(['GET'])
+    const done = await cal.setAutoReply({ plan_id: /plan_id: (\S+)/.exec(out)![1]! })
+    expect(done).toContain('Automatic replies are set from 2026-11-13 00:00 to 2026-11-14 00:00')
+    // The bot once guessed "Settings → Mail"; the result now says where it is.
+    expect(done).toContain('Settings (gear) → Account → Automatic replies')
+    expect(done).not.toContain('→ Mail')
+    const setting = g.calls[1]!.body.automaticRepliesSetting
+    expect(setting.status).toBe('scheduled')
+    expect(setting.scheduledStartDateTime).toEqual({ dateTime: '2026-11-13T00:00:00', timeZone: VN_ZONE })
+    expect(setting.scheduledEndDateTime).toEqual({ dateTime: '2026-11-14T00:00:00', timeZone: VN_ZONE })
+    expect(setting.internalReplyMessage).toContain('&lt;thứ Sáu&gt;<br>')
+    expect(setting.externalReplyMessage).toBe(setting.internalReplyMessage)
+    expect(setting.externalAudience).toBe('all')
+    expect(JSON.parse(readFileSync(join(dir, 'sent.jsonl'), 'utf8')).kind).toBe('auto_reply')
+  })
+
+  test('turning off, and the rules on what to pass', async () => {
+    const g = graph()
+    const cal = calendar(g.fetchImpl)
+    const off = await cal.prepareAutoReply({ turn_off: true })
+    expect(off).toContain('will: turn automatic replies off')
+    await cal.setAutoReply({ plan_id: /plan_id: (\S+)/.exec(off)![1]! })
+    expect(g.calls[1]!.body).toEqual({ automaticRepliesSetting: { status: 'disabled' } })
+    await expect(cal.prepareAutoReply({})).rejects.toThrow(/message is required/)
+    await expect(cal.prepareAutoReply({ message: 'x', start: '2026-11-13' })).rejects.toThrow(/both start and end/)
+    await expect(cal.setAutoReply({ plan_id: 'a_nope' })).rejects.toThrow(/unknown or expired/)
   })
 })
 

@@ -204,7 +204,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'calendar_prepare_event',
       description:
-        'Step 1 of setting up a meeting or a calendar entry. Creates and sends nothing: returns a plan_id and what would be sent, to show the sender. start (and end) as "YYYY-MM-DD HH:MM", Vietnam time; or duration_minutes (default 60). A Teams meeting link is added unless teams_meeting is false.',
+        'Step 1 of setting up a meeting or a calendar entry. Creates and sends nothing: returns a plan_id and what would be sent, to show the sender. start (and end) as "YYYY-MM-DD HH:MM", Vietnam time; or duration_minutes (default 60). all_day: start (and end, the last day, default the same day) as "YYYY-MM-DD". A Teams meeting link is added when there are attendees and the entry is not all day, unless teams_meeting says otherwise. For a day out of office: all_day, show_as "oof", no attendees.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -214,8 +214,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           duration_minutes: { type: 'number' },
           attendees: { ...list, description: 'Email addresses, or colleagues\' names as in mail_create_draft' },
           location: { type: 'string', description: 'A room or an address' },
-          body: { type: 'string', description: 'Plain text for the invitation' },
+          body: { type: 'string', description: 'Plain text for the invitation or the entry\'s description' },
           teams_meeting: { type: 'boolean' },
+          all_day: { type: 'boolean' },
+          show_as: { type: 'string', enum: ['free', 'tentative', 'busy', 'oof', 'workingElsewhere'], description: 'oof = Out of office' },
+          reminder_minutes: { type: 'number', description: 'Minutes before; 0 = no reminder; omit for Outlook\'s default' },
+          sensitivity: { type: 'string', enum: ['normal', 'personal', 'private', 'confidential'] },
+          importance: { type: 'string', enum: ['low', 'normal', 'high'] },
+          repeat: { type: 'string', enum: ['daily', 'weekdays', 'weekly', 'monthly'], description: 'With repeat_until or repeat_count' },
+          repeat_until: { type: 'string', description: '"YYYY-MM-DD", the last day it may occur' },
+          repeat_count: { type: 'number', description: 'How many times, 1 to 100' },
         },
         required: ['subject', 'start'],
       },
@@ -223,12 +231,69 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'calendar_create_event',
       description:
-        'Step 2: create the meeting planned by calendar_prepare_event, which sends invitations to its attendees. Only when the Teams sender has said to go ahead. expect_attendees (the addresses shown, or the same names) and expect_start must repeat the plan exactly; otherwise nothing is created.',
+        'Step 2: create the meeting planned by calendar_prepare_event, which sends invitations to its attendees. Only when the Teams sender has said to go ahead. expect_attendees (the addresses shown, or the same names) and expect_start (for an all-day entry, its first day) must repeat the plan exactly; otherwise nothing is created.',
       inputSchema: {
         type: 'object',
         properties: { plan_id: { type: 'string' }, expect_attendees: list, expect_start: { type: 'string' } },
         required: ['plan_id', 'expect_start'],
       },
+    },
+    {
+      name: 'calendar_prepare_update',
+      description:
+        'Step 1 of changing an entry already in the Teams sender\'s calendar. Changes nothing: returns what would change, who would be told, and a plan_id, to show the sender. event_id from calendar_list_events; pass only what changes. Times as in calendar_prepare_event (all-day entries take dates; moving start keeps the length unless end or duration_minutes is given). body replaces the description. add_attendees / remove_attendees by email or colleagues\' names. A meeting someone else organised: only show_as and reminder_minutes. One occurrence of a repeating meeting changes only that occurrence.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          event_id: { type: 'string' },
+          subject: { type: 'string' },
+          start: { type: 'string' },
+          end: { type: 'string' },
+          duration_minutes: { type: 'number' },
+          all_day: { type: 'boolean' },
+          show_as: { type: 'string', enum: ['free', 'tentative', 'busy', 'oof', 'workingElsewhere'] },
+          reminder_minutes: { type: 'number', description: '0 = no reminder' },
+          sensitivity: { type: 'string', enum: ['normal', 'personal', 'private', 'confidential'] },
+          importance: { type: 'string', enum: ['low', 'normal', 'high'] },
+          body: { type: 'string' },
+          location: { type: 'string' },
+          add_attendees: list,
+          remove_attendees: list,
+          teams_meeting: { type: 'boolean', description: 'true adds a Teams link' },
+        },
+        required: ['event_id'],
+      },
+    },
+    {
+      name: 'calendar_update_event',
+      description:
+        'Step 2: apply the change planned by calendar_prepare_update; for a meeting the sender organised, attendees get an update. Only when the Teams sender has said to go ahead. expect_subject must repeat the event\'s current subject exactly.',
+      inputSchema: {
+        type: 'object',
+        properties: { plan_id: { type: 'string' }, expect_subject: { type: 'string' } },
+        required: ['plan_id', 'expect_subject'],
+      },
+    },
+    {
+      name: 'mail_prepare_auto_reply',
+      description:
+        'Step 1 of turning automatic replies (out of office) on or off in the Teams sender\'s Outlook. Changes nothing: returns the current state, what would be set and a plan_id, to show the sender. start and end as "YYYY-MM-DD" (whole days) or "YYYY-MM-DD HH:MM", Vietnam time; without them the replies stay on until turned off. message is the reply colleagues get; external_message the one people outside the firm get (default: the same); external_audience none, contactsOnly or all (default all). turn_off: true to switch them off.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          turn_off: { type: 'boolean' },
+          start: { type: 'string' },
+          end: { type: 'string' },
+          message: { type: 'string' },
+          external_message: { type: 'string' },
+          external_audience: { type: 'string', enum: ['none', 'contactsOnly', 'all'] },
+        },
+      },
+    },
+    {
+      name: 'mail_set_auto_reply',
+      description: 'Step 2: apply the automatic-reply setting planned by mail_prepare_auto_reply. Only when the Teams sender has said to go ahead.',
+      inputSchema: { type: 'object', properties: { plan_id: { type: 'string' } }, required: ['plan_id'] },
     },
     {
       name: 'calendar_cancel_event',
@@ -450,6 +515,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         break
       case 'calendar_create_event':
         text = await calendar.createEvent(args)
+        break
+      case 'calendar_prepare_update':
+        text = await calendar.prepareUpdate(args)
+        break
+      case 'calendar_update_event':
+        text = await calendar.updateEvent(args)
+        break
+      case 'mail_prepare_auto_reply':
+        text = await calendar.prepareAutoReply(args)
+        break
+      case 'mail_set_auto_reply':
+        text = await calendar.setAutoReply(args)
         break
       case 'calendar_cancel_event':
         text = await calendar.cancelEvent(args)

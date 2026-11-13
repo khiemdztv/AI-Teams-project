@@ -29,7 +29,7 @@ import {
   type Attachment,
 } from './attach.js'
 import { buildFileConsentCard } from './file-consent.js'
-import { buildLinkCard, type LinkButton } from './link-buttons.js'
+import { buildLinkCard, fitsInCard, type LinkButton } from './link-buttons.js'
 import type { PendingUploadStore } from './pending-uploads.js'
 import {
   describeSharePointFailure,
@@ -193,7 +193,7 @@ export type DeliverParams = {
   text: string
   /** Teams renders markdown by default; 'plain' is for text that must appear literally. */
   textFormat?: 'markdown' | 'plain'
-  /** "Open" buttons, carried by the last text message (fork, 09/11). */
+  /** "Open" buttons on a card with the last part of the text (fork, 09/11). */
   links?: LinkButton[]
   plan: OutboundFilePlan[]
   conversationId: string
@@ -248,12 +248,19 @@ export async function deliverOutbound(p: DeliverParams): Promise<DeliveryResult>
 
     for (const [i, chunk] of chunks.entries()) {
       const last = i === chunks.length - 1
-      const sent = await p.post({
-        type: 'message',
-        text: chunk,
-        textFormat: p.textFormat ?? 'markdown',
-        ...(last && links.length ? { attachments: [buildLinkCard(links)] } : {}),
-      })
+      // The text goes inside the card when the card can render it: one bubble
+      // instead of the text and, under it, a wide card holding only buttons.
+      const inCard = last && links.length > 0 && fitsInCard(chunk, p.textFormat)
+      const sent = await p.post(
+        inCard
+          ? { type: 'message', attachments: [buildLinkCard(links, chunk)] }
+          : {
+              type: 'message',
+              text: chunk,
+              textFormat: p.textFormat ?? 'markdown',
+              ...(last && links.length ? { attachments: [buildLinkCard(links)] } : {}),
+            },
+      )
       landed++
       if (sent?.id) sentIds.push(String(sent.id))
     }

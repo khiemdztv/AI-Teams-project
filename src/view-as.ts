@@ -19,9 +19,12 @@ export const VIEW_AS_FILE = 'view-as-user.json'
 
 export type ViewAsCommand = 'on' | 'off' | 'toggle'
 
-/** "/useransw", "/useransw on", "/useransw off" (any case, surrounding space); anything else is chat. */
+/**
+ * "/useransw", "/useransw on", "/useransw off" (any case, surrounding space,
+ * "\useransw" too); anything else is chat.
+ */
 export function parseViewAsCommand(text: string): ViewAsCommand | undefined {
-  const m = /^\s*\/useransw(?:\s+(on|off|bật|tắt))?\s*$/i.exec(String(text ?? ''))
+  const m = /^\s*[/\\]useransw(?:\s+(on|off|bật|tắt))?\s*$/i.exec(String(text ?? ''))
   if (!m) return undefined
   const arg = m[1]?.toLowerCase()
   if (!arg) return 'toggle'
@@ -50,9 +53,11 @@ export function applyViewAs(stateDir: string, senderId: string, cmd: ViewAsComma
   return on
 }
 
-const TRIGGER = /(^|\s)\/useransw(?=\s|$)/gi
+// "\useransw" counts too: people type the backslash by mistake, and the
+// word then reached Claude while the status line stayed an admin's (12/11).
+const TRIGGER = /(^|\s)[/\\]useransw(?=\s|$)/gi
 /** The trigger with the spaces after it, so removing it leaves no gap at a line start. */
-const TRIGGER_WITH_SPACE = /(^|\s)\/useransw(?:[ \t]+|(?=\s)|$)/gi
+const TRIGGER_WITH_SPACE = /(^|\s)[/\\]useransw(?:[ \t]+|(?=\s)|$)/gi
 
 /**
  * "/useransw" inside a message with other text: that one message is answered

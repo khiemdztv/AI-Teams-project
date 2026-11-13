@@ -95,7 +95,7 @@ describe('channel registration', () => {
 })
 
 describe('tool surface', () => {
-  test('exactly the four MVP tools, plus the fork make_pdf, make_video, log_internal and notes tools, are exposed', () => {
+  test('exactly the four MVP tools, plus the fork make_pdf, make_video, log_internal, notes and watch_outlook tools, are exposed', () => {
     expect(tools.map(t => t.name).sort()).toEqual([
       'download_attachment',
       'edit_message',
@@ -107,6 +107,7 @@ describe('tool surface', () => {
       'notes_list',
       'react',
       'reply',
+      'watch_outlook',
     ])
   })
 
@@ -123,7 +124,8 @@ describe('tool surface', () => {
     // That parameter is what the outbound gate looks up; a tool without it
     // would be reaching Teams without passing the gate at all.
     // make_video, log_internal and the notes tools write local files and address no conversation.
-    const local = ['download_attachment', 'make_pdf', 'make_video', 'log_internal', 'notes_list', 'note_add', 'note_done']
+    // watch_outlook reports later in the turn's own chat, through the same gate, never one Claude names.
+    const local = ['download_attachment', 'make_pdf', 'make_video', 'log_internal', 'notes_list', 'note_add', 'note_done', 'watch_outlook']
     for (const tool of tools.filter(t => !local.includes(t.name))) {
       expect(tool.inputSchema.required).toContain('conversation_id')
     }

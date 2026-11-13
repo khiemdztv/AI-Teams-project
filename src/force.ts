@@ -12,9 +12,10 @@
  * "/force" alone, after the bot showed a draft, means "send that one".
  */
 
-const TRIGGER = /(^|\s)\/force(?=\s|$)/gi
+// "\force" counts too, as "\useransw" does (src/view-as.ts).
+const TRIGGER = /(^|\s)[/\\]force(?=\s|$)/gi
 /** The trigger with the spaces after it, so removing it leaves no gap at a line start. */
-const TRIGGER_WITH_SPACE = /(^|\s)\/force(?:[ \t]+|(?=\s)|$)/gi
+const TRIGGER_WITH_SPACE = /(^|\s)[/\\]force(?:[ \t]+|(?=\s)|$)/gi
 
 /** What a bare "/force" stands for once the word is gone. */
 export const FORCE_ALONE_TEXT = 'Gửi luôn.'

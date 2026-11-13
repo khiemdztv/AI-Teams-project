@@ -14,6 +14,9 @@ describe('the command', () => {
     expect(parseViewAsCommand('  /UserAnsw on ')).toBe('on')
     expect(parseViewAsCommand('/useransw off')).toBe('off')
     expect(parseViewAsCommand('/useransw tắt')).toBe('off')
+    // The backslash typed by mistake (12/11).
+    expect(parseViewAsCommand('\\useransw')).toBe('toggle')
+    expect(parseViewAsCommand('\\useransw off')).toBe('off')
   })
 
   test('anything around it is chat', () => {
@@ -60,6 +63,8 @@ describe('the trigger inside a sentence', () => {
     expect(stripViewAsTrigger('/useransw lịch hôm nay của tôi')).toBe('lịch hôm nay của tôi')
     expect(stripViewAsTrigger('lịch /UserAnsw hôm nay')).toBe('lịch hôm nay')
     expect(stripViewAsTrigger('dòng 1\n/useransw dòng 2')).toBe('dòng 1\ndòng 2')
+    expect(stripViewAsTrigger('bản tin sáng \\useransw')).toBe('bản tin sáng')
+    expect(stripViewAsTrigger('C:\\useransw\\x')).toBeUndefined()
   })
 
   test('no trigger, or the word glued to something else: undefined', () => {

@@ -12,6 +12,8 @@ describe('stripForceTrigger', () => {
     expect(stripForceTrigger('/force nhắn Jimmy là em tới trễ')).toBe('nhắn Jimmy là em tới trễ')
     expect(stripForceTrigger('nhắn Jimmy /FORCE là em tới trễ')).toBe('nhắn Jimmy là em tới trễ')
     expect(stripForceTrigger('dòng 1\n/force dòng 2')).toBe('dòng 1\ndòng 2')
+    expect(stripForceTrigger('nhắn Jimmy là em tới trễ \\force')).toBe('nhắn Jimmy là em tới trễ')
+    expect(stripForceTrigger('\\force')).toBe(FORCE_ALONE_TEXT)
   })
 
   test('/force alone means send what was shown', () => {

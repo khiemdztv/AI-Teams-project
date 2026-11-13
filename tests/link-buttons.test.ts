@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   ADAPTIVE_CARD_CONTENT_TYPE,
+  fitsInCard,
   MAX_LINK_BUTTONS,
   buildLinkCard,
   parseLinkButtons,
@@ -37,10 +38,14 @@ describe('link buttons (fork, 09/11)', () => {
     expect(() => parseLinkButtons('https://e.com')).toThrow(/array/)
   })
 
-  test('the card holds one OpenUrl action per link', () => {
+  test('the card holds one filled OpenUrl button per link, in its body', () => {
     const card = buildLinkCard([{ title: 'A', url: 'https://a.com/' }])
     expect(card.contentType).toBe(ADAPTIVE_CARD_CONTENT_TYPE)
-    expect(card.content.actions).toEqual([{ type: 'Action.OpenUrl', title: 'A', url: 'https://a.com/' }])
+    expect(card.content.body).toEqual([
+      { type: 'ActionSet', spacing: 'None', actions: [{ type: 'Action.OpenUrl', title: 'A', url: 'https://a.com/', style: 'positive' }] },
+    ])
+    // Card-level actions under an empty body left a tall empty frame in Teams.
+    expect((card.content as Record<string, unknown>).actions).toBeUndefined()
   })
 
   const pending = new PendingUploadStore(mkdtempSync(join(tmpdir(), 'links-')))
@@ -60,11 +65,17 @@ describe('link buttons (fork, 09/11)', () => {
     return { posted, result }
   }
 
-  test('the buttons ride on the last text message', async () => {
+  test('the last part of the text goes inside the card, above the buttons', async () => {
     const { posted, result } = await deliver('x'.repeat(30_000))
     expect(posted.length).toBeGreaterThan(1)
-    expect(posted.slice(0, -1).every(a => !a.attachments)).toBe(true)
-    expect(posted.at(-1)!.attachments[0].contentType).toBe(ADAPTIVE_CARD_CONTENT_TYPE)
+    expect(posted.slice(0, -1).every(a => !a.attachments && a.text)).toBe(true)
+    const last = posted.at(-1)!
+    expect(last.text).toBeUndefined()
+    expect(last.attachments[0].contentType).toBe(ADAPTIVE_CARD_CONTENT_TYPE)
+    const [block, buttons] = last.attachments[0].content.body
+    expect(block).toMatchObject({ type: 'TextBlock', wrap: true })
+    expect(block.text.length).toBeGreaterThan(0)
+    expect(buttons.type).toBe('ActionSet')
     expect(result.sent).toBe(posted.length)
   })
 
@@ -80,10 +91,22 @@ describe('link buttons (fork, 09/11)', () => {
     expect(result).toEqual({ sentIds: [], sent: 1, offered: [] })
   })
 
+  test('text a card cannot render stays a message, with the buttons under it', async () => {
+    for (const text of ['| a | b |\n|---|---|\n| 1 | 2 |', '```\ncode\n```', '# Tiêu đề', '> trích dẫn']) {
+      expect(fitsInCard(text)).toBe(false)
+    }
+    expect(fitsInCard('**Đậm**, _nghiêng_\n- một\n- hai [link](https://e.com)')).toBe(true)
+    expect(fitsInCard('x', 'plain')).toBe(false)
+    const { posted } = await deliver('| a | b |\n|---|---|\n| 1 | 2 |')
+    expect(posted).toHaveLength(1)
+    expect(posted[0].text).toContain('| a |')
+    expect(posted[0].attachments[0].content.body).toHaveLength(1)
+  })
+
   test('with no text the buttons are a message of their own', async () => {
     const { posted } = await deliver('')
     expect(posted).toHaveLength(1)
     expect(posted[0].text).toBeUndefined()
-    expect(posted[0].attachments[0].content.actions).toHaveLength(1)
+    expect(posted[0].attachments[0].content.body[0].actions).toHaveLength(1)
   })
 })
