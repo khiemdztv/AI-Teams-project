@@ -13,8 +13,13 @@ import {
   readWatches,
   checkWatches,
   probeOutlook,
+  readyTasks,
+  takeTask,
+  taskPrompt,
   WATCH_FILE,
   WATCH_GIVE_UP_MS,
+  TASK_WAIT_MS,
+  MAX_TASK_CHARS,
   type Probe,
 } from '../src/outlook-watch.js'
 
@@ -89,6 +94,68 @@ describe('checking', () => {
     await checkWatches(dir, T0 + 1, async () => up)
     const [notice] = await checkWatches(dir, T0 + 2, async () => up)
     expect(notice!.text).not.toMatch(/Graph|502|200|token|m365/i)
+  })
+})
+
+describe('a task to do once Outlook is back (13/11)', () => {
+  const TASK = 'Nhắn Teams cho Jordan (jordan@fabrikam.com): "Chị ơi, hợp đồng em gửi chiều nay nhé."'
+
+  test('kept with the watch; too long is refused', () => {
+    addWatch(dir, KIEN, 'a:kien', T0, `  ${TASK}  `)
+    expect(readWatches(dir)[KIEN]!.then).toBe(TASK)
+    expect(() => addWatch(dir, KIEN, 'a:kien', T0, 'x'.repeat(MAX_TASK_CHARS + 1))).toThrow(/longer than/)
+  })
+
+  test('once back, the person is told, the task waits for the bot, and is taken exactly once', async () => {
+    addWatch(dir, KIEN, 'a:kien', T0, TASK)
+    addWatch(dir, BOSS, 'a:boss', T0)
+    await checkWatches(dir, T0 + 180_000, async () => up)
+    const notices = await checkWatches(dir, T0 + 360_000, async () => up)
+    expect(notices.find(n => n.senderId === KIEN)!.text).toContain('Bắt đầu làm việc đã dặn: “Nhắn Teams cho Jordan')
+    expect(notices.find(n => n.senderId === BOSS)!.text).toContain('Outlook đã dùng lại được')
+    // The plain watch is done; the one with a task waits, and is not probed again.
+    expect(Object.keys(readWatches(dir))).toEqual([KIEN])
+    let probed = 0
+    expect(await checkWatches(dir, T0 + 540_000, async () => (probed++, down))).toEqual([])
+    expect(probed).toBe(0)
+
+    const [task] = readyTasks(dir)
+    expect(task).toEqual({ senderId: KIEN, conversationId: 'a:kien', since: T0, then: TASK })
+    expect(takeTask(dir, task!)).toBe(true)
+    expect(takeTask(dir, task!)).toBe(false)
+    expect(readyTasks(dir)).toEqual([])
+  })
+
+  test('a watch started over meanwhile is not taken as the old task', async () => {
+    addWatch(dir, KIEN, 'a:kien', T0, TASK)
+    await checkWatches(dir, T0 + 1, async () => up)
+    await checkWatches(dir, T0 + 2, async () => up)
+    const [task] = readyTasks(dir)
+    addWatch(dir, KIEN, 'a:kien', T0 + 3, 'việc khác')
+    expect(takeTask(dir, task!)).toBe(false)
+    expect(readWatches(dir)[KIEN]!.then).toBe('việc khác')
+  })
+
+  test('a task the bot never gets to, or a watch that never comes back, is reported and dropped', async () => {
+    addWatch(dir, KIEN, 'a:kien', T0, TASK)
+    await checkWatches(dir, T0 + 1, async () => up)
+    await checkWatches(dir, T0 + 2, async () => up)
+    const [dropped] = await checkWatches(dir, T0 + 2 + TASK_WAIT_MS, async () => up)
+    expect(dropped!.text).toContain('bot bận suốt 2 giờ nên chưa làm việc đã dặn')
+    expect(readWatches(dir)).toEqual({})
+
+    addWatch(dir, BOSS, 'a:boss', T0, TASK)
+    const [gaveUp] = await checkWatches(dir, T0 + WATCH_GIVE_UP_MS, async () => down)
+    expect(gaveUp!.text).toContain('Việc đã dặn chưa làm: “Nhắn Teams cho Jordan')
+  })
+
+  test('the turn that does it says when it was asked, to redo the draft, and to do nothing else', () => {
+    const prompt = taskPrompt({ senderId: KIEN, conversationId: 'a:kien', since: T0, then: TASK }, T0 + 3600_000)
+    expect(prompt).toContain('việc dặn lúc 09:05 kèm /force')
+    expect(prompt).toContain('Outlook dùng lại được từ 10:05')
+    expect(prompt).toContain('soạn lại rồi gửi')
+    expect(prompt).toContain('Đừng làm thêm việc nào khác')
+    expect(prompt.endsWith(`Việc đã dặn: ${TASK}`)).toBe(true)
   })
 })
 

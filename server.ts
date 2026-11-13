@@ -85,7 +85,17 @@ import { graphTokenGetter } from './src/sharepoint.js'
 import { readSchedules, readRan, markRan, dueJobs, jobPrompt, vnClock, type Job } from './src/schedule.js'
 import { listNotes, addNote, doneNote, formatNotes } from './src/notes.js'
 import { MSTEAMS_SCHEDULED_TOOLS, SCHEDULED_REFUSAL } from './src/scheduled-guard.js'
-import { addWatch, stopWatch, readWatches, probeOutlook, checkWatches, WATCH_EVERY_MS } from './src/outlook-watch.js'
+import {
+  addWatch,
+  stopWatch,
+  readWatches,
+  probeOutlook,
+  checkWatches,
+  readyTasks,
+  takeTask,
+  taskPrompt,
+  WATCH_EVERY_MS,
+} from './src/outlook-watch.js'
 import { loadConfig as loadM365Config } from './m365/config.js'
 import { UserAuths, tokenPath } from './m365/users.js'
 
@@ -487,10 +497,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'watch_outlook',
       description:
-        'When the Teams sender asks to be told once Outlook (email or calendar) works again during a Microsoft outage: checks their mail and calendar now, and if they do not answer, keeps checking every 3 minutes with the sender\'s own sign-in and messages them in this chat as soon as both work again (gives up after 12 hours). Runs without you: do not set a cron job or loop for this, a scheduled turn has no sender and cannot read any mailbox. stop: true cancels the sender\'s watch.',
+        'When the Teams sender asks to be told once Outlook (email, calendar, Teams messages through Microsoft 365) works again during a Microsoft outage: checks their mail and calendar now, and if they do not answer, keeps checking every 3 minutes with the sender\'s own sign-in and messages them in this chat as soon as both work again (gives up after 12 hours). Runs without you: never set a cron job, sleep or loop for this, a turn you start yourself has no sender and cannot use any mailbox. If the sender also asked for something to be done once it works (send a message or email already drafted, for example) AND their message carried force="true", put that task in `then`, in full (who, what, the exact text): when Outlook is back the plugin starts a new turn as the sender with that task and force, and you do it then. Without force="true", `then` is refused: watch only, and tell them to say "gửi đi" when told it is back. stop: true cancels the sender\'s watch and its task.',
       inputSchema: {
         type: 'object',
-        properties: { stop: { type: 'boolean', description: 'Cancel the sender\'s watch' } },
+        properties: {
+          then: {
+            type: 'string',
+            description: 'Only with force="true": the task to do once Outlook works again, complete enough to do without the current conversation (recipients, the exact text, files)',
+          },
+          stop: { type: 'boolean', description: 'Cancel the sender\'s watch' },
+        },
       },
     },
   ],
@@ -574,13 +590,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       if (args.stop === true) {
         return ok(stopWatch(STATE_DIR, turn.senderId) ? 'Stopped watching Outlook for the sender.' : 'Nothing was being watched for the sender.')
       }
+      const then = typeof args.then === 'string' ? args.then.trim() : ''
+      // Nobody confirms a task when it runs, so only a message that already
+      // said "go ahead" (/force, set by the plugin, not by Claude) may leave one.
+      if (then && !turn.force) {
+        return fail(
+          'refused: a task to do later needs /force in the sender\'s message, since nobody will confirm it then. Watch without `then`, and tell the sender to say "gửi đi" when they are told Outlook is back, or to resend the request with /force.',
+        )
+      }
       const ref = conversations.get(turn.conversationId)
       if (!ref || !outboundAllowed(ref, loadAccess()).allowed) return fail('refused: this chat cannot be messaged later')
       const probe = await probeOutlook(outlookToken(turn.senderId))
-      if (probe.ok) return ok(`Outlook answers now (${probe.detail}), so nothing is being watched. Tell the sender it works.`)
-      addWatch(STATE_DIR, turn.senderId, ref.conversationId)
+      if (probe.ok) {
+        return ok(
+          `Outlook answers now (${probe.detail}), so nothing is being watched.${then ? ' Do the task now instead.' : ' Tell the sender it works.'}`,
+        )
+      }
+      addWatch(STATE_DIR, turn.senderId, ref.conversationId, Date.now(), then || undefined)
       return ok(
-        `Outlook does not answer now (${probe.detail}). Watching: checked every 3 minutes; the sender gets a message in this chat as soon as mail and calendar work again, or after 12 hours if they never do. Nothing else to set up.`,
+        then
+          ? `Outlook does not answer now (${probe.detail}). Watching every 3 minutes; once mail and calendar work again the sender is told, and a new turn starts as the sender with this task and force: you do it then, not now. Up to 12 hours. Nothing else to set up.`
+          : `Outlook does not answer now (${probe.detail}). Watching: checked every 3 minutes; the sender gets a message in this chat as soon as mail and calendar work again, or after 12 hours if they never do. Nothing else to set up.`,
       )
     } catch (err) {
       return fail(err instanceof Error ? err.message : 'watch failed')
@@ -834,6 +864,7 @@ async function beginTurn(
   senderName: string | undefined,
   role: 'admin' | 'user',
   scheduled?: TurnLock['scheduled'],
+  force?: boolean,
 ): Promise<boolean> {
   if (activeTurn && !isStale(activeTurn)) {
     // A job finds the bot busy: no notice, it tries again on the next tick.
@@ -852,6 +883,7 @@ async function beginTurn(
     role,
     ...(senderName ? { senderName } : {}),
     ...(scheduled ? { scheduled } : {}),
+    ...(force ? { force: true } : {}),
   }
   activeTurn = lock
   // Written once, before Claude is notified, so no Stop for this turn can run
@@ -1044,6 +1076,8 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
       normalizeSenderId(String(activity.from?.aadObjectId ?? '')),
       typeof activity.from?.name === 'string' ? activity.from.name : undefined,
       role,
+      undefined,
+      forced !== undefined,
     ))
   )
     return
@@ -1197,6 +1231,49 @@ async function runOutlookWatches(now = Date.now()): Promise<void> {
   } finally {
     checkingOutlook = false
   }
+  void startWatchTask()
+}
+
+/**
+ * Start the oldest task whose Outlook is back, as the person who left it, if
+ * the bot is free. Called every 30 seconds and after each watch round.
+ */
+async function startWatchTask(now = Date.now()): Promise<void> {
+  if (!teamsApp || (activeTurn && !isStale(activeTurn)) || scheduling) return
+  const task = readyTasks(STATE_DIR)[0]
+  if (!task) return
+  const access = loadAccess()
+  const ref = conversations.get(task.conversationId)
+  // Only in the person's own 1:1 chat, still allowed (the gate also refuses group chats).
+  if (!ref || !outboundAllowed(ref, access).allowed || normalizeSenderId(String(ref.senderId ?? '')) !== task.senderId) {
+    // Revoked since: drop the task silently, like any refusal toward Teams.
+    takeTask(STATE_DIR, task)
+    process.stderr.write('msteams channel: outlook watch task dropped: sender or chat no longer allowed\n')
+    return
+  }
+  const role = effectiveRole(roleOf(access, task.senderId), task.senderId, readViewAs(STATE_DIR))
+  // Taken before the turn starts, so a crash never runs it twice. Nothing has
+  // been awaited since the busy check above, so beginTurn cannot find the bot busy.
+  if (!takeTask(STATE_DIR, task)) return
+  if (!(await beginTurn(ref.conversationId, task.senderId, undefined, role, undefined, true))) return
+  process.stderr.write('msteams channel: outlook watch task started\n')
+  void mcp
+    .notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: taskPrompt(task, now),
+        meta: {
+          conversation_id: ref.conversationId,
+          conversation_type: ref.conversationType,
+          user_id: task.senderId,
+          role,
+          force: 'true',
+          watch: 'outlook',
+          ts: new Date(now).toISOString(),
+        },
+      },
+    })
+    .catch(err => process.stderr.write(`msteams channel: failed to deliver outlook watch task to Claude: ${err}\n`))
 }
 
 if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
@@ -1304,6 +1381,8 @@ if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
   setInterval(() => void runScheduledJobs(), 30_000).unref()
   // Fork (13/11): Outlook watches, whether or not Claude is busy.
   setInterval(() => void runOutlookWatches(), WATCH_EVERY_MS).unref()
+  // A task whose Outlook is back waits here for the bot to be free.
+  setInterval(() => void startWatchTask(), 30_000).unref()
 
   await app.start(WEBHOOK_PORT)
 

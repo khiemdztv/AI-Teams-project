@@ -131,6 +131,13 @@ describe('tool surface', () => {
     }
   })
 
+  test('watch_outlook takes a task only with force, and says not to use cron', () => {
+    const watch = tools.find(t => t.name === 'watch_outlook')
+    expect(Object.keys(watch.inputSchema.properties).sort()).toEqual(['stop', 'then'])
+    expect(watch.inputSchema.properties.then.description).toContain('force="true"')
+    expect(watch.description).toMatch(/never set a cron job/)
+  })
+
   test('reply threads on thread_id, and says so where a model will read it', () => {
     const reply = tools.find(t => t.name === 'reply')
     expect(reply.inputSchema.properties.reply_to.description).toContain('thread_id')

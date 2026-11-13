@@ -41,6 +41,12 @@ export type TurnLock = {
    * rather than a message. Such a turn is read-only: see src/scheduled-guard.ts.
    */
   scheduled?: 'morning' | 'evening'
+  /**
+   * Fork (13/11): the message carried /force (src/force.ts), so the sender
+   * said to go ahead without confirming. Lets watch_outlook keep a task to do
+   * later, when nobody will be there to confirm it.
+   */
+  force?: boolean
   /** The "⏳" status message, edited to "✅" when the turn ends. */
   statusMessageId?: string
 }
