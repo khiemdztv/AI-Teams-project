@@ -1,4 +1,4 @@
-# Claude Code on Microsoft Teams, with Microsoft 365 tools
+# Claude Code on Microsoft Teams, with Microsoft 365 tools.
 
 A team chats with a Claude Code session from Microsoft Teams. Claude reads and drafts email,
 checks calendars and books meetings, finds files in OneDrive and SharePoint, and sends Word
