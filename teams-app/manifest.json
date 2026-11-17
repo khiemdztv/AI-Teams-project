@@ -1,7 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
   "manifestVersion": "1.17",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "id": "__BOT_ID__",
   "developer": {
     "name": "khiemdztv",
@@ -14,8 +14,8 @@
     "outline": "outline.png"
   },
   "name": {
-    "short": "Teams Claude",
-    "full": "Teams Claude — trợ lý Claude qua Teams"
+    "short": "Fabrikam Agent",
+    "full": "Fabrikam Agent — trợ lý AI của Fabrikam qua Teams"
   },
   "description": {
     "short": "Nhắn tin với trợ lý Claude qua Teams.",
