@@ -86,3 +86,10 @@ test('a corrupt entry is skipped by list rather than throwing', () => {
   Bun.write(join(dir, 'garbage.json'), '{not json')
   expect(store.list()).toHaveLength(1)
 })
+
+test('a group chat records who tagged the bot last; a channel records nobody (fork, 17/11)', () => {
+  store.upsert(activity({ conversation: { id: '19:g@thread.v2', conversationType: 'groupChat' }, from: { aadObjectId: 'ABC-1' } }))
+  store.upsert(activity({ conversation: { id: '19:c@thread.tacv2', conversationType: 'channel' }, from: { aadObjectId: 'ABC-1' } }))
+  expect(store.get('19:g@thread.v2')?.senderId).toBe('abc-1')
+  expect(store.get('19:c@thread.tacv2')?.senderId).toBeUndefined()
+})

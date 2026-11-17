@@ -8,8 +8,10 @@
  *     attacker-controlled and never grant access.
  *   - Conversation ids are normalized before comparison — Teams appends
  *     `;messageid=…` for thread scoping, so the raw id is not stable.
- *   - This fork accepts 1:1 chats only. Group chats and channels are refused
- *     in code, whatever access.json says (upstream made them opt-in).
+ *   - This fork accepts 1:1 chats, and (17/11) group chats where an allowlisted
+ *     sender @mentions the bot, only while `groupChats: true` is in access.json.
+ *     Channels are refused in code, and `groups` (upstream's per-room opt-in,
+ *     where an empty list let anyone in the room drive the bot) is ignored.
  *
  * `outboundAllowed()` below is the outbound counterpart: a reply may only
  * target a conversation that is allowed *now*, which is what stops a malicious
@@ -83,6 +85,13 @@ export type Access = {
    * about anyone else's. Only meaningful alongside `admins`.
    */
   limitedAdmins?: string[]
+  /**
+   * Fork addition (17/11): answer in group chats. A group message gets through
+   * only when it @mentions the bot AND its sender is in the top-level
+   * `allowFrom`; anyone else in the chat is ignored as a stranger is in a 1:1.
+   * Absent or false: group chats are refused, as before. Channels never pass.
+   */
+  groupChats?: boolean
 }
 
 export type Role = 'admin' | 'user'
@@ -206,9 +215,14 @@ export function gate(input: GateInput, access: Access, configuredTenantId: strin
   const sender = normalizeSenderId(input.senderAadObjectId)
   const senderAllowed = includesSender(access.allowFrom, sender)
 
-  // Fork policy: 1:1 chats only. Upstream let an opted-in group chat or channel
-  // through, and with an empty group allowFrom anyone in the room could drive
-  // the session. `groups` in access.json is ignored entirely.
+  // Fork policy: upstream let an opted-in group chat or channel through, and
+  // with an empty group allowFrom anyone in the room could drive the session.
+  // `groups` in access.json is ignored entirely. A group chat passes only on
+  // the operator's switch, an @mention, and an allowlisted sender (17/11).
+  if (input.conversationType === 'groupChat' && access.groupChats === true) {
+    if (!input.mentionsBot) return { allowed: false, reason: 'mention_required' }
+    return senderAllowed ? { allowed: true } : { allowed: false, reason: 'sender_not_allowed' }
+  }
   if (input.conversationType !== 'personal') {
     return { allowed: false, reason: 'group_disabled' }
   }
@@ -220,7 +234,10 @@ export function gate(input: GateInput, access: Access, configuredTenantId: strin
 export type OutboundTarget = {
   conversationId: string
   conversationType: string
-  /** Personal conversations only, and absent on references written before it was recorded. */
+  /**
+   * Personal: the other end. Group chat: the last allowlisted sender who
+   * mentioned the bot there. Absent on references written before it was recorded.
+   */
   senderId?: string
 }
 
@@ -255,7 +272,18 @@ export function outboundAllowed(target: OutboundTarget, access: Access): GateVer
       : { allowed: false, reason: 'sender_not_allowed' }
   }
 
-  // Fork policy: never send into a group chat or channel (see gate()).
+  // A group chat: only while the switch is on, and only while whoever brought
+  // the bot there is still allowed, so removing them silences the chat too.
+  // The server adds a third condition: a group is answered only from a turn
+  // that started in it (see the outbound gate in server.ts).
+  if (target.conversationType === 'groupChat' && access.groupChats === true) {
+    if (!target.senderId) return { allowed: false, reason: 'no_sender_identity' }
+    return includesSender(access.allowFrom, normalizeSenderId(target.senderId))
+      ? { allowed: true }
+      : { allowed: false, reason: 'sender_not_allowed' }
+  }
+
+  // Fork policy: never send into a channel, or a group chat with the switch off.
   return { allowed: false, reason: 'group_disabled' }
 }
 

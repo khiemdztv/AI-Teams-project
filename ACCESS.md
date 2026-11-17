@@ -46,7 +46,23 @@ You rarely need to find one by hand: pairing captures it, and
 
 ## Channels and group chats
 
-A channel is opted in per conversation:
+> **This fork differs from what follows.** Channels are always refused, and the
+> per-conversation `groups` opt-in below is ignored. Group chats have one switch,
+> set by hand in `access.json`:
+>
+> ```json
+> "groupChats": true
+> ```
+>
+> With it on, a group-chat message reaches the session only when it @mentions the
+> bot **and** its sender is in the top-level `allowFrom`; anyone else in the chat
+> is ignored silently, as a stranger is in a DM. Replies go into a group chat only
+> during a turn that started there, and stop as soon as the person who last
+> tagged the bot there is removed from `allowFrom`. Permission prompts still go to
+> DMs only. Without the switch (the default) group chats are refused as before.
+> The app package must also list `groupChat` in its bot scopes.
+
+Upstream: a channel is opted in per conversation:
 
 ```
 /msteams:access group add 19:...@thread.tacv2

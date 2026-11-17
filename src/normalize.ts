@@ -43,6 +43,12 @@ export type NormalizeInput = {
   force?: boolean
   /** Fork addition (02/11): cloud files shared into the chat, by address. */
   sharedFiles?: { name?: string; url: string }[]
+  /**
+   * Fork addition (17/11): for a group-chat message, the sender's own 1:1 chat
+   * with the bot, when there is one, so their private data can go there
+   * instead of to everyone in the group. Set by the server.
+   */
+  dmConversationId?: string
 }
 
 const META_KEY = /^[A-Za-z0-9_]+$/
@@ -64,6 +70,23 @@ function put(meta: Record<string, string>, key: string, value: unknown): void {
   meta[key] = String(value)
 }
 
+/**
+ * Fork addition (17/11): drop the bot's own @mention ("<at>Fabrikam Agent</at>")
+ * from a group message, so Claude reads the request, not the bot's name. Only
+ * the mention whose entity points at the bot's id goes; a colleague's mention
+ * ("nhắn cho <at>An</at>") is part of what is being asked.
+ */
+export function withoutBotMention(text: string, entities: unknown, botId: string | undefined): string {
+  if (!botId || !Array.isArray(entities)) return text
+  let out = text
+  for (const e of entities as { type?: string; text?: string; mentioned?: { id?: string } }[]) {
+    if (e?.type === 'mention' && e.mentioned?.id === botId && typeof e.text === 'string' && e.text) {
+      out = out.split(e.text).join('')
+    }
+  }
+  return out === text ? text : out.replace(/[ \t]{2,}/g, ' ').trim()
+}
+
 export function normalize(input: NormalizeInput): ChannelNotification {
   const a = input.activity
   const conversationType = (a.conversation?.conversationType ?? 'personal') as ConversationType
@@ -79,6 +102,7 @@ export function normalize(input: NormalizeInput): ChannelNotification {
   put(meta, 'user_id', a.from?.aadObjectId)
   if (input.role) put(meta, 'role', input.role)
   if (input.force) put(meta, 'force', 'true')
+  if (conversationType !== 'personal') put(meta, 'dm_conversation_id', input.dmConversationId)
   put(meta, 'tenant_id', a.channelData?.tenant?.id ?? a.conversation?.tenantId)
   put(meta, 'ts', a.timestamp ?? new Date().toISOString())
 
@@ -130,7 +154,7 @@ export function normalize(input: NormalizeInput): ChannelNotification {
     put(meta, 'shared_files', shared.map(f => `${sanitizeFilename(f.name ?? 'file')} ${f.url}`).join('; '))
   }
 
-  const text = typeof a.text === 'string' ? a.text : ''
+  const text = withoutBotMention(typeof a.text === 'string' ? a.text : '', a.entities, a.recipient?.id)
   const named = attachments.find(f => f.name)?.name ?? shared.find(f => f.name)?.name
   const fallback = named ? `(${sanitizeFilename(named)})` : imagePaths.length ? '(image)' : ''
 

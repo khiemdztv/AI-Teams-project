@@ -34,12 +34,14 @@ export type ConversationRef = {
   teamId?: string
   channelId?: string
   /**
-   * 1:1 chats only: the AAD object id on the other end, lowercased.
+   * The AAD object id, lowercased: in a 1:1 chat the other end, in a group chat
+   * (17/11) the last allowlisted sender who mentioned the bot there. Channels: none.
    *
    * The permission relay has to find "the DM belonging to this allowlisted
    * sender", and a Teams personal conversation id is not derivable from an AAD
-   * object id. Recorded only for `personal` conversations — in a group the
-   * sender is whoever spoke last, which would be meaningless here.
+   * object id; everything that looks a person's DM up by it filters on
+   * `conversationType === 'personal'` first. In a group chat it is what the
+   * outbound gate re-checks, so revoking that sender silences the chat too.
    */
   senderId?: string
   updatedAt: string
@@ -73,7 +75,7 @@ export class ConversationStore {
         ? String(activity.channelData.teamsChannelId)
         : undefined,
       senderId:
-        conversationType === 'personal' && activity.from?.aadObjectId
+        (conversationType === 'personal' || conversationType === 'groupChat') && activity.from?.aadObjectId
           ? normalizeSenderId(String(activity.from.aadObjectId))
           : undefined,
       updatedAt: new Date().toISOString(),

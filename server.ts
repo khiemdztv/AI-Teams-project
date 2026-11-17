@@ -600,6 +600,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       const ref = conversations.get(turn.conversationId)
       if (!ref || !outboundAllowed(ref, loadAccess()).allowed) return fail('refused: this chat cannot be messaged later')
+      // Fork (17/11): the notice and any task are the sender's own business.
+      if (ref.conversationType !== 'personal') {
+        return fail('refused: Outlook is watched only from the sender\'s 1:1 chat with the bot; ask them to request it there')
+      }
       const probe = await probeOutlook(outlookToken(turn.senderId))
       if (probe.ok) {
         return ok(
@@ -659,6 +663,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   if (turn?.scheduled && ref.conversationId !== turn.conversationId) {
     process.stderr.write(`msteams channel: outbound refused (${req.params.name}): scheduled job, other conversation\n`)
     return fail('refused: a scheduled job only answers in the chat it was started for')
+  }
+
+  // Fork (17/11): a group chat is answered only from a turn that started in it.
+  // Everyone in it reads the answer, so a turn for one person's 1:1 (their mail,
+  // their calendar) must never be able to post into a group, nor a group's turn
+  // into another group.
+  if (ref.conversationType !== 'personal' && ref.conversationId !== turn?.conversationId) {
+    process.stderr.write(`msteams channel: outbound refused (${req.params.name}): group chat outside its own turn\n`)
+    return fail('refused: a group chat is only answered while answering a message from that group')
   }
 
   const outbound = outboundAllowed(ref, loadAccess())
@@ -929,6 +942,12 @@ async function endTurn(text: string): Promise<void> {
   )
 }
 
+/** Fork (17/11): `senderId`'s own 1:1 chat with the bot, if one is on record and still allowed. */
+function dmOf(senderId: string, access: Access): string | undefined {
+  const ref = conversations.list().find(r => r.conversationType === 'personal' && r.senderId === senderId)
+  return ref && outboundAllowed(ref, access).allowed ? ref.conversationId : undefined
+}
+
 /** Gate an activity, and if it passes, push it to the session. */
 async function dispatch(activity: Record<string, any>): Promise<void> {
   const access = loadAccess()
@@ -1117,6 +1136,7 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
         sharedFiles: shared,
         role,
         force: forced !== undefined,
+        dmConversationId: conversationType === 'groupChat' ? dmOf(senderId, access) : undefined,
       }),
     })
     .catch(err => {

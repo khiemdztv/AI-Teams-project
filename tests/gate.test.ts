@@ -180,6 +180,65 @@ describe('group and channel gating (fork: always refused)', () => {
   })
 })
 
+describe('group chats with the groupChats switch (fork, 17/11)', () => {
+  const GROUP = '19:abc@thread.v2'
+  const group = (over: Partial<GateInput> = {}): GateInput =>
+    dm({ conversationType: 'groupChat', conversationId: GROUP, mentionsBot: true, ...over })
+  const on = (over: Partial<Access> = {}) => access({ allowFrom: [SENDER], groupChats: true, ...over })
+
+  test('an allowlisted sender who tags the bot gets through', () => {
+    expect(gate(group(), on(), TENANT)).toEqual({ allowed: true })
+  })
+
+  test('without the switch a group chat is still refused', () => {
+    expect(gate(group(), access({ allowFrom: [SENDER] }), TENANT)).toEqual({ allowed: false, reason: 'group_disabled' })
+    expect(gate(group(), access({ allowFrom: [SENDER], groupChats: false }), TENANT)).toEqual({
+      allowed: false,
+      reason: 'group_disabled',
+    })
+  })
+
+  test('a message that does not tag the bot is refused', () => {
+    expect(gate(group({ mentionsBot: false }), on(), TENANT)).toEqual({ allowed: false, reason: 'mention_required' })
+  })
+
+  test('someone else in the chat who tags the bot is refused, whatever `groups` says', () => {
+    // Upstream's per-room `groups` with an empty allowFrom meant "anyone in the
+    // room"; it must not come back through the new switch.
+    const a = on({ groups: { [GROUP]: { requireMention: false, allowFrom: [] } } })
+    expect(gate(group({ senderAadObjectId: 'someone-else' }), a, TENANT)).toEqual({
+      allowed: false,
+      reason: 'sender_not_allowed',
+    })
+  })
+
+  test('channels stay refused with the switch on', () => {
+    expect(gate(group({ conversationType: 'channel' }), on(), TENANT)).toEqual({ allowed: false, reason: 'group_disabled' })
+  })
+
+  test('the disabled kill switch still drops group chats', () => {
+    expect(gate(group(), on({ dmPolicy: 'disabled' }), TENANT)).toEqual({ allowed: false, reason: 'dm_disabled' })
+  })
+
+  test('the tenant boundary still comes first', () => {
+    expect(gate(group({ tenantId: 'other' }), on(), TENANT)).toEqual({ allowed: false, reason: 'tenant_mismatch' })
+  })
+
+  test('outbound to a group chat: only with the switch, and only while its sender is allowed', () => {
+    const ref = { conversationId: GROUP, conversationType: 'groupChat', senderId: SENDER }
+    expect(outboundAllowed(ref, on())).toEqual({ allowed: true })
+    expect(outboundAllowed(ref, access({ allowFrom: [SENDER] }))).toEqual({ allowed: false, reason: 'group_disabled' })
+    expect(outboundAllowed(ref, on({ allowFrom: [] }))).toEqual({ allowed: false, reason: 'sender_not_allowed' })
+    expect(outboundAllowed({ ...ref, senderId: undefined }, on())).toEqual({ allowed: false, reason: 'no_sender_identity' })
+    expect(outboundAllowed(ref, on({ dmPolicy: 'disabled' }))).toEqual({ allowed: false, reason: 'dm_disabled' })
+  })
+
+  test('outbound to a channel stays refused with the switch on', () => {
+    const ref = { conversationId: '19:chan@thread.tacv2', conversationType: 'channel', senderId: SENDER }
+    expect(outboundAllowed(ref, on())).toEqual({ allowed: false, reason: 'group_disabled' })
+  })
+})
+
 describe('outbound gate', () => {
   const CONV = '19:abc@thread.tacv2'
   const dmRef = { conversationId: 'a:1conv', conversationType: 'personal', senderId: SENDER }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { normalize, sanitizeFilename } from '../src/normalize.js'
+import { normalize, sanitizeFilename, withoutBotMention } from '../src/normalize.js'
 
 const TENANT = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 const OID = '00000000-1111-2222-3333-444444444444'
@@ -214,5 +214,34 @@ describe('role (fork, 02/11)', () => {
 
   test('no role, no meta key', () => {
     expect('role' in normalize({ activity: dmActivity() }).meta).toBe(false)
+  })
+})
+
+describe('group chats (fork, 17/11)', () => {
+  const groupActivity = () => ({
+    ...dmActivity(),
+    text: '<at>Fabrikam Agent</at> nhắn cho <at>An</at> là họp lúc 3 giờ',
+    conversation: { id: '19:g@thread.v2', conversationType: 'groupChat', tenantId: TENANT },
+    entities: [
+      { type: 'mention', text: '<at>Fabrikam Agent</at>', mentioned: { id: '28:bot', name: 'Fabrikam Agent' } },
+      { type: 'mention', text: '<at>An</at>', mentioned: { id: '29:an', name: 'An' } },
+    ],
+  })
+
+  test("the bot's own mention is dropped, a colleague's is kept", () => {
+    expect(withoutBotMention('<at>Fabrikam Agent</at> nhắn cho <at>An</at> là họp', groupActivity().entities, '28:bot')).toBe(
+      'nhắn cho <at>An</at> là họp',
+    )
+    expect(normalize({ activity: groupActivity() }).content).toBe('nhắn cho <at>An</at> là họp lúc 3 giờ')
+  })
+
+  test('a mention entity for someone else never strips text', () => {
+    expect(withoutBotMention('<at>Fabrikam Agent</at> hi', groupActivity().entities, '28:other')).toBe('<at>Fabrikam Agent</at> hi')
+  })
+
+  test("the sender's 1:1 chat travels as dm_conversation_id, in group chats only", () => {
+    expect(normalize({ activity: groupActivity(), dmConversationId: 'a:1conv' }).meta.dm_conversation_id).toBe('a:1conv')
+    expect(normalize({ activity: dmActivity(), dmConversationId: 'a:1conv' }).meta.dm_conversation_id).toBeUndefined()
+    expect(normalize({ activity: groupActivity() }).meta.dm_conversation_id).toBeUndefined()
   })
 })
