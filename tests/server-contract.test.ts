@@ -73,7 +73,10 @@ beforeAll(async () => {
   await proc.stdin.flush()
 
   tools = (await request('tools/list')).tools
-})
+  // A cold start of server.ts (Bun compiling it and the Teams SDK) can pass
+  // bun's 5s hook default on a slower Windows machine, which failed the whole
+  // file as "(unnamed)" (13/11, 16/11, 17/11) though the server was fine.
+}, 30_000)
 
 afterAll(() => {
   proc?.kill()
