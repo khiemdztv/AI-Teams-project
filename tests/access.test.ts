@@ -12,7 +12,7 @@ import {
   PAIRING_TTL_MS,
   MAX_PENDING,
 } from '../src/access.js'
-import { DEFAULT_ACCESS, roleOf, canApprove, type Access } from '../src/gate.js'
+import { DEFAULT_ACCESS, roleOf, canApprove, gate, type Access } from '../src/gate.js'
 
 let dir: string
 beforeEach(() => {
@@ -199,6 +199,30 @@ describe('admins (fork, 02/11)', () => {
 })
 
 describe('limited admins (fork, 06/11)', () => {
+  test('groupChats: true survives a read and a save, so the group gate can see it (18/11)', () => {
+    // The 17/11 switch was dropped here, so every group tag was refused as
+    // group_disabled although access.json said true.
+    writeFileSync(join(dir, 'access.json'), JSON.stringify({ ...fresh(), allowFrom: ['a'], groupChats: true }))
+    const a = readAccess(dir)
+    expect(a.groupChats).toBe(true)
+    saveAccess(dir, a)
+    expect(readAccess(dir).groupChats).toBe(true)
+    expect(
+      gate(
+        { tenantId: 't', conversationId: '19:g@thread.v2', conversationType: 'groupChat', senderAadObjectId: 'a', mentionsBot: true },
+        readAccess(dir),
+        't',
+      ),
+    ).toEqual({ allowed: true })
+  })
+
+  test('only a literal true opens group chats', () => {
+    for (const v of ['true', 1, 'yes', null]) {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({ ...fresh(), groupChats: v }))
+      expect(readAccess(dir).groupChats).toBeUndefined()
+    }
+  })
+
   test('a limitedAdmins list survives a read; anything else is dropped', () => {
     writeFileSync(join(dir, 'access.json'), JSON.stringify({ ...fresh(), allowFrom: ['a', 'n'], admins: ['a'], limitedAdmins: ['n'] }))
     expect(readAccess(dir).limitedAdmins).toEqual(['n'])

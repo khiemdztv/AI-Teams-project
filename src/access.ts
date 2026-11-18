@@ -71,6 +71,8 @@ export function readAccess(dir: string): Access {
       // Fork: kept only when it is a list, so a typo cannot make everyone a user.
       ...(Array.isArray(parsed.admins) ? { admins: parsed.admins.map(String) } : {}),
       ...(Array.isArray(parsed.limitedAdmins) ? { limitedAdmins: parsed.limitedAdmins.map(String) } : {}),
+      // Fork (17/11): only a literal true opens group chats; a string or 1 does not.
+      ...(parsed.groupChats === true ? { groupChats: true } : {}),
     }
   } catch {
     try {

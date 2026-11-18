@@ -33,6 +33,7 @@ import {
   type ConversationType,
 } from './src/gate.js'
 import { appendAssistantLog } from './src/assistant-log.js'
+import { describeRefusal, appendRefusal } from './src/refusal-log.js'
 import {
   parseViewAsCommand,
   applyViewAs,
@@ -993,6 +994,9 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
         String(activity.conversation?.id ?? ''),
       )} type=${conversationType}\n`,
     )
+    // Fork (18/11): stderr is invisible mid-session, so the reason also goes to
+    // refused.log in the state dir, without the message text or any id.
+    appendRefusal(STATE_DIR, describeRefusal(activity, verdict.reason, TENANT_ID ?? ''))
     return
   }
 
