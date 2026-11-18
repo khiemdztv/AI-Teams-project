@@ -12,7 +12,7 @@ import type { Fetch } from './auth.js'
 import { assertWithinAnyRoot } from '../src/attach.js'
 import { GraphError } from './mail.js'
 import { saveForUse, formatSize, MAX_DOWNLOAD_BYTES } from './downloads.js'
-import { Handles } from './handles.js'
+import { Handles, hashOf } from './handles.js'
 
 const GRAPH = 'https://graph.microsoft.com/v1.0'
 const MAX_HITS = 25
@@ -26,6 +26,25 @@ export type FilesOptions = {
   /** Folders files may be uploaded from (the export folder). Empty = uploading is off. */
   uploadRoots?: string[]
   fetchImpl?: Fetch
+  /** Whose turn it is (18/11): a share plan only works for the sender who made it. */
+  actor?: () => string
+  now?: () => number
+  /** Firm domains: sharing with named people is for colleagues only. */
+  internalDomains?: string[]
+}
+
+/** How long a share plan waits for the sender's yes. */
+const SHARE_PLAN_TTL_MS = 30 * 60 * 1000
+
+/** A sharing change waiting for the sender's yes (18/11). */
+type SharePlan = {
+  actor: string
+  driveId: string
+  itemId: string
+  name: string
+  /** 'organization': a view link anyone in the firm can open. Otherwise these emails, read only. */
+  to: 'organization' | string[]
+  at: number
 }
 
 /** The sender's OneDrive folder that uploads go to. */
@@ -68,9 +87,30 @@ export class Files {
   private readonly fetchImpl: Fetch
   /** file_id handles stand for "<drive id>/<item id>"; see handles.ts. */
   private readonly files = new Handles('f')
+  private readonly sharePlans = new Map<string, SharePlan>()
 
   constructor(private readonly opts: FilesOptions) {
     this.fetchImpl = opts.fetchImpl ?? fetch
+  }
+
+  private now(): number {
+    return (this.opts.now ?? Date.now)()
+  }
+
+  /** The drive item a file_id or a SharePoint/OneDrive address stands for. */
+  private async itemOf(input: { file_id?: string; url?: string }): Promise<{ base: string; item: DriveItem }> {
+    let base: string
+    if (input.file_id) {
+      const [driveId, itemId] = this.files.full(input.file_id, 'file_id', 'files_search').split('/')
+      if (!driveId || !itemId) throw new Error('that file_id has no drive; use its url instead')
+      base = `/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(itemId)}`
+    } else if (input.url && /^https:\/\/[^/]+\.sharepoint\.com\//i.test(input.url.trim())) {
+      base = `/shares/${shareId(input.url)}/driveItem`
+    } else {
+      throw new Error('pass file_id from files_search, or url: the file\'s SharePoint/OneDrive address')
+    }
+    const item = (await this.graph('GET', `${base}?$select=${ITEM_FIELDS}`)) as DriveItem
+    return { base, item }
   }
 
   private async graph(method: string, path: string, body?: unknown): Promise<any> {
@@ -115,17 +155,7 @@ export class Files {
   async get(input: { file_id?: string; url?: string }): Promise<string> {
     const root = this.opts.downloadDir
     if (!root) throw new Error('fetching files is disabled (M365_ATTACH_ROOT is not set)')
-    let base: string
-    if (input.file_id) {
-      const [driveId, itemId] = this.files.full(input.file_id, 'file_id', 'files_search').split('/')
-      if (!driveId || !itemId) throw new Error('that file_id has no drive; use its url instead')
-      base = `/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(itemId)}`
-    } else if (input.url && /^https:\/\/[^/]+\.sharepoint\.com\//i.test(input.url.trim())) {
-      base = `/shares/${shareId(input.url)}/driveItem`
-    } else {
-      throw new Error('pass file_id from files_search, or url: the file\'s SharePoint/OneDrive address')
-    }
-    const item = (await this.graph('GET', `${base}?$select=${ITEM_FIELDS}`)) as DriveItem
+    const { base, item } = await this.itemOf(input)
     if (item.folder || !item.file) throw new Error(`${item.name ?? 'that'} is a folder, not a file`)
     if ((item.size ?? 0) > MAX_DOWNLOAD_BYTES) throw new Error(`${item.name} is larger than ${formatSize(MAX_DOWNLOAD_BYTES)}`)
 
@@ -170,6 +200,73 @@ export class Files {
     const size = statSync(path).size
     if (size > MAX_UPLOAD_BYTES) throw new Error(`${name} is larger than ${formatSize(MAX_UPLOAD_BYTES)}`)
     return { path, name, size }
+  }
+
+  /**
+   * Fork addition (18/11), step 1 of sharing a file or folder the sender can
+   * share: with everyone in the firm (a view link), or read-only with named
+   * colleagues. Changes nothing; returns a plan_id the sender must agree to.
+   */
+  async prepareShare(input: { file_id?: string; url?: string; organization?: boolean; people?: string[] }): Promise<string> {
+    const people = (input.people ?? []).map(p => String(p).trim().toLowerCase()).filter(Boolean)
+    const org = input.organization === true
+    if (org === (people.length > 0)) throw new Error('give exactly one of organization: true or people (emails)')
+    if (people.some(p => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(p))) throw new Error('people must be email addresses')
+    const domains = (this.opts.internalDomains ?? []).map(d => d.toLowerCase())
+    const outside = people.filter(p => domains.length && !domains.includes(p.split('@')[1]!))
+    if (outside.length) throw new Error(`only colleagues: ${outside.join(', ')} ${outside.length > 1 ? 'are' : 'is'} outside the firm`)
+    const { item } = await this.itemOf(input)
+    const driveId = item.parentReference?.driveId
+    if (!driveId) throw new Error(`${item.name ?? 'that file'} has no drive that can be shared`)
+    const plan: SharePlan = {
+      actor: this.opts.actor?.() ?? '',
+      driveId,
+      itemId: item.id,
+      name: item.name ?? 'file',
+      to: org ? 'organization' : [...new Set(people)].sort(),
+      at: this.now(),
+    }
+    const id = `s_${hashOf(JSON.stringify(plan))}`
+    for (const [k, p] of this.sharePlans) if (this.now() - p.at > SHARE_PLAN_TTL_MS) this.sharePlans.delete(k)
+    this.sharePlans.set(id, plan)
+    const expect = plan.to === 'organization' ? 'organization' : plan.to.join(', ')
+    return [
+      'Nothing has been shared yet. Show this to the Teams sender; share only when they say to.',
+      `plan_id: ${id}`,
+      `file: ${plan.name}${item.folder ? ' (folder)' : ''} · ${location(item.webUrl)}`,
+      plan.to === 'organization'
+        ? 'share with: EVERYONE in the firm, view only, through a link (people outside the firm cannot open it)'
+        : `share with: ${expect}, view only, no email sent`,
+      `expect: ${expect}`,
+    ].join('\n')
+  }
+
+  /** Step 2: share as planned, as the sender. Returns the link to send. */
+  async share(input: { plan_id: string; expect: string }): Promise<string> {
+    const planId = String(input.plan_id ?? '').trim()
+    const plan = this.sharePlans.get(planId)
+    if (!plan || this.now() - plan.at > SHARE_PLAN_TTL_MS || plan.actor !== (this.opts.actor?.() ?? '')) {
+      throw new Error('unknown or expired plan_id: run files_prepare_share again and show the sender the result')
+    }
+    const expect = plan.to === 'organization' ? 'organization' : plan.to.join(', ')
+    const given = String(input.expect ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean).sort().join(', ')
+    if (given !== expect) throw new Error(`refused: expect must repeat the plan exactly: ${expect}`)
+    this.sharePlans.delete(planId)
+    const path = `/drives/${encodeURIComponent(plan.driveId)}/items/${encodeURIComponent(plan.itemId)}`
+    if (plan.to === 'organization') {
+      const res = await this.graph('POST', `${path}/createLink`, { type: 'view', scope: 'organization' })
+      const link = String(res?.link?.webUrl ?? '')
+      if (!link) throw new Error('Graph made no link')
+      return `${plan.name} can now be opened by everyone in the firm (view only).\nlink: ${link}`
+    }
+    const res = await this.graph('POST', `${path}/invite`, {
+      recipients: plan.to.map(email => ({ email })),
+      roles: ['read'],
+      requireSignIn: true,
+      sendInvitation: false,
+    })
+    const link = String(res?.value?.[0]?.link?.webUrl ?? '')
+    return `${plan.name} is shared with ${expect} (view only, no email sent).${link ? `\nlink: ${link}` : ''}`
   }
 
   /**

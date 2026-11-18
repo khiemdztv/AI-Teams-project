@@ -50,7 +50,23 @@ const mail = new Mail({
   signatureOmit: () => signatureOmit(config.signatureOmitFile, currentSender(config.msteamsStateDir)),
 })
 
-const files = new Files({ token, downloadDir: config.filesDir, uploadRoots: config.attachRoots })
+const files = new Files({
+  token,
+  downloadDir: config.filesDir,
+  uploadRoots: config.attachRoots,
+  actor: () => currentSender(config.msteamsStateDir),
+  internalDomains: config.internalDomains,
+})
+
+/**
+ * Fork (18/11): the group chat the current Teams message came from, as Graph
+ * knows it. From turn.json, which the plugin writes; a 1:1 chat with the bot
+ * has a Bot Framework id ("a:…") that is no Graph chat, so it gives nothing.
+ */
+const currentChat = (): string | undefined => {
+  const id = readTurnLock(config.msteamsStateDir)?.conversationId
+  return id && /^19:[^;\s]+@thread\.v2$/.test(id) ? id : undefined
+}
 
 const calendar = new Calendar({
   token,
@@ -66,6 +82,7 @@ const teams = new TeamsChats({
   sendLog: config.sendLog,
   files,
   downloadDir: config.downloadDir,
+  currentChat,
   // Tool, short code and count only: message content never reaches a log.
   log: line => process.stderr.write(`m365: ${line}\n`),
 })
@@ -327,7 +344,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          chat_id: { type: 'string', description: 'The c_… code from teams_list_chats' },
+          chat_id: { type: 'string', description: 'The c_… code from teams_list_chats, or "this": the group chat the current message came from (e.g. to find the file someone means by "cái này")' },
           since: { type: 'string' },
           until: { type: 'string', description: 'Exclusive; a date means the end of that day' },
           top: { type: 'number', description: '1-50, default 30' },
@@ -384,6 +401,50 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: { plan_id: { type: 'string' }, expect_to: list },
         required: ['plan_id', 'expect_to'],
+      },
+    },
+    {
+      name: 'teams_prepare_add_member',
+      description:
+        'Step 1 of adding colleagues to a group chat the sender is in, as the sender. Changes nothing. chat_id is "this" (the group chat the current message came from) or a c_… code from teams_list_chats; people by name as the sender said it or by email (a name matching several people fails with the list: ask which). Added people see the whole history. Returns a plan_id and expect_add to repeat.',
+      inputSchema: {
+        type: 'object',
+        properties: { chat_id: { type: 'string' }, people: list },
+        required: ['chat_id', 'people'],
+      },
+    },
+    {
+      name: 'teams_add_member',
+      description:
+        'Step 2: add the people planned by teams_prepare_add_member. Only when the sender said to (or force="true"). expect_add must repeat the plan\'s expect_add exactly.',
+      inputSchema: {
+        type: 'object',
+        properties: { plan_id: { type: 'string' }, expect_add: list },
+        required: ['plan_id', 'expect_add'],
+      },
+    },
+    {
+      name: 'files_prepare_share',
+      description:
+        'Step 1 of sharing a SharePoint/OneDrive file the sender can share (url from teams_read_chat, shared_file_url or files_upload, or file_id from files_search). Exactly one of: organization: true (a view link everyone in the firm can open) or people (colleagues\' emails, view only, no email sent). Changes nothing; returns a plan_id and expect to repeat. To post the link somewhere, send it afterwards with reply or teams_prepare_message.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          file_id: { type: 'string' },
+          organization: { type: 'boolean' },
+          people: list,
+        },
+      },
+    },
+    {
+      name: 'files_share',
+      description:
+        'Step 2: share as planned by files_prepare_share, as the sender, and get the link. Only when the sender said to (or force="true"). expect must repeat the plan\'s expect exactly ("organization" or the emails).',
+      inputSchema: {
+        type: 'object',
+        properties: { plan_id: { type: 'string' }, expect: { type: 'string' } },
+        required: ['plan_id', 'expect'],
       },
     },
     {
@@ -548,6 +609,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         break
       case 'teams_send_message':
         text = await teams.sendMessage(args)
+        break
+      case 'teams_prepare_add_member':
+        text = await teams.prepareAddMembers(args)
+        break
+      case 'teams_add_member':
+        text = await teams.addMembers(args)
+        break
+      case 'files_prepare_share':
+        text = await files.prepareShare(args)
+        break
+      case 'files_share':
+        text = await files.share(args)
         break
       case 'mail_create_folder':
         text = await mail.createFolder(args)

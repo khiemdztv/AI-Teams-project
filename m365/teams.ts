@@ -73,7 +73,17 @@ export type TeamsOptions = {
   log?: (line: string) => void
   fetchImpl?: Fetch
   now?: () => number
+  /**
+   * Fork addition (18/11): the Graph id of the group chat the current Teams
+   * message came from, read from turn.json (set by the plugin, never by the
+   * model); undefined in a 1:1 chat with the bot. It is what chat_id "this"
+   * means.
+   */
+  currentChat?: () => string | undefined
 }
+
+/** People to add to a chat, waiting for the sender's yes (18/11). */
+type AddPlan = { actor: string; chatId: string; label: string; users: User[]; at: number }
 
 /** Where messages are read from; picture paths are built from it, never taken from message HTML. */
 type Source = { kind: 'chat'; chatId: string } | { kind: 'channel'; teamId: string; channelId: string }
@@ -150,6 +160,7 @@ export class TeamsChats {
   /** Directory user id → email, '' when not found. */
   private readonly emails = new Map<string, string>()
   private readonly plans = new Map<string, Plan>()
+  private readonly addPlans = new Map<string, AddPlan>()
   private readonly people: People
 
   constructor(private readonly opts: TeamsOptions) {
@@ -207,6 +218,22 @@ export class TeamsChats {
     }
     if (!raw.replace(/["\\]/g, '')) throw new Error('an empty name in "to"')
     return this.people.byName(raw)
+  }
+
+  /**
+   * Fork addition (18/11): chat_id "this" is the group chat the current Teams
+   * message came from; anything else must be a c_ code from teams_list_chats.
+   */
+  private chatIdOf(raw: string): string {
+    if (raw === 'this') {
+      const id = this.opts.currentChat?.()
+      if (!id) throw new Error('chat_id "this" only works for a message sent in a group chat; use teams_list_chats for other chats')
+      return id
+    }
+    if (!this.chats.isHandle(raw)) throw new Error('chat_id phải là "this" (nhóm đang chat) hoặc mã c_… mà teams_list_chats in ra; gọi teams_list_chats để lấy.')
+    const id = this.chats.lookup(raw)
+    if (!id) throw new Error('Không tìm thấy chat, gọi lại teams_list_chats.')
+    return id
   }
 
   /** The sender's chats, most recent first. */
@@ -426,6 +453,88 @@ export class TeamsChats {
   }
 
   // -------------------------------------------------------------------------
+  // Adding people to a group chat (fork addition, 18/11). Two steps like a
+  // message: the plan names who is added where, and only the sender's yes
+  // (the plan_id and the same people repeated) adds them. Colleagues only.
+  // -------------------------------------------------------------------------
+
+  /** Step 1: who would be added to which group chat. Changes nothing. */
+  async prepareAddMembers(input: { chat_id: string; people: string[] }): Promise<string> {
+    const chatId = this.chatIdOf(String(input.chat_id ?? '').trim())
+    const wanted = (input.people ?? []).map(p => String(p).trim()).filter(Boolean)
+    if (!wanted.length) throw new Error('people is required: who to add, by name or email')
+    if (wanted.length > MAX_PEOPLE) throw new Error(`at most ${MAX_PEOPLE} people at once`)
+    const me = await this.me()
+    // Through /me: only a chat the sender is in.
+    const chat = (await this.graph('GET', `/me/chats/${encodeURIComponent(chatId)}?$expand=members`)) as Chat
+    if (chat.chatType !== 'group') {
+      throw new Error('people can only be added to a group chat; for a 1:1 chat, start a group with teams_prepare_message (to + group: true)')
+    }
+    const inside = new Set((chat.members ?? []).map(m => m.userId).filter(Boolean))
+    const users = new Map<string, User>()
+    const already: string[] = []
+    for (const entry of wanted) {
+      const user = await this.person(entry)
+      if (user.id === me.id || inside.has(user.id)) already.push(user.email)
+      else users.set(user.id, user)
+    }
+    if (!users.size) throw new Error(`nobody to add: ${already.join(', ')} already in the chat`)
+    const list = [...users.values()].sort((a, b) => a.email.localeCompare(b.email))
+    const others = this.others(chat, me.id)
+    const label = `group chat${chat.topic ? ` "${chat.topic}"` : ''} with ${others.join(', ') || '(only you)'}`
+    const plan: AddPlan = { actor: this.opts.actor?.() ?? '', chatId, label, users: list, at: this.now() }
+    const id = `a_${hashOf(JSON.stringify({ actor: plan.actor, chatId, users: list.map(u => u.id), at: plan.at }))}`
+    for (const [k, p] of this.addPlans) if (this.now() - p.at > PLAN_TTL_MS) this.addPlans.delete(k)
+    this.addPlans.set(id, plan)
+    const ext = this.external(list.map(u => u.email))
+    return [
+      'Nobody has been added yet. Show this to the Teams sender; add them only when they say to.',
+      `plan_id: ${id}`,
+      `chat: ${label}`,
+      `add: ${list.map(u => `${u.name} <${u.email}>`).join(', ')}`,
+      `expect_add: ${list.map(u => u.email).join(', ')}`,
+      ext.length ? `EXTERNAL people (outside the firm): ${ext.join(', ')}` : '',
+      already.length ? `already in the chat, skipped: ${already.join(', ')}` : '',
+      'They will see the whole chat history, and Teams shows that the sender added them.',
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }
+
+  /** Step 2: add the planned people, as the sender. */
+  async addMembers(input: { plan_id: string; expect_add: string[] }): Promise<string> {
+    const planId = String(input.plan_id ?? '').trim()
+    const plan = this.addPlans.get(planId)
+    if (!plan || this.now() - plan.at > PLAN_TTL_MS || plan.actor !== (this.opts.actor?.() ?? '')) {
+      throw new Error('unknown or expired plan_id: run teams_prepare_add_member again and show the sender the result')
+    }
+    const emails = plan.users.map(u => u.email.toLowerCase()).sort()
+    if (norm(input.expect_add).join(',') !== emails.join(',')) {
+      throw new Error(`refused: expect_add must repeat the plan's people exactly: ${emails.join(', ')}`)
+    }
+    // Spent from here: a retry after a partial failure must not add anyone twice.
+    this.addPlans.delete(planId)
+    const added: string[] = []
+    for (const user of plan.users) {
+      try {
+        await this.graph('POST', `/chats/${encodeURIComponent(plan.chatId)}/members`, {
+          '@odata.type': '#microsoft.graph.aadUserConversationMember',
+          roles: ['owner'],
+          'user@odata.bind': `${GRAPH}/users('${user.id}')`,
+          visibleHistoryStartDateTime: '0001-01-01T00:00:00Z',
+        })
+      } catch (err) {
+        throw new Error(
+          `${added.length ? `added ${added.join(', ')}; ` : ''}NOT added ${user.email} or anyone after (${err instanceof Error ? err.message : 'failed'})`,
+        )
+      }
+      added.push(user.email)
+    }
+    this.opts.log?.(`teams_add_member ${added.length} people`)
+    return `Added to the ${plan.label}: ${added.join(', ')}.`
+  }
+
+  // -------------------------------------------------------------------------
   // Reading (fork addition, 05/11): the sender's own chats and the channels of
   // their own teams, through their own token. Read-only: nothing is marked
   // read, sent or reacted to.
@@ -434,9 +543,7 @@ export class TeamsChats {
   /** Messages in one of the sender's chats (1:1, group, meeting), oldest first. */
   async readChat(input: ReadInput & { chat_id: string }): Promise<string> {
     const raw = String(input.chat_id ?? '').trim()
-    if (!this.chats.isHandle(raw)) throw new Error('chat_id phải là mã c_… mà teams_list_chats in ra; gọi teams_list_chats để lấy.')
-    const chatId = this.chats.lookup(raw)
-    if (!chatId) throw new Error('Không tìm thấy chat, gọi lại teams_list_chats.')
+    const chatId = this.chatIdOf(raw)
     const w = this.window(input)
     const src: Source = { kind: 'chat', chatId }
     try {

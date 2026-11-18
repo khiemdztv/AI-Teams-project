@@ -249,9 +249,9 @@ describe('teams_read_chat', () => {
   test('only c_ codes: a Graph id or an unknown code is refused before Graph is called', async () => {
     const g = fakeGraph(chatRoutes())
     const t = teams(g.fetchImpl)
-    await expect(t.readChat({ chat_id: CHAT })).rejects.toThrow('chat_id phải là mã c_')
+    await expect(t.readChat({ chat_id: CHAT })).rejects.toThrow('hoặc mã c_')
     await expect(t.readChat({ chat_id: 'c_0123456789' })).rejects.toThrow('Không tìm thấy chat, gọi lại teams_list_chats.')
-    await expect(t.readChat({ chat_id: '' })).rejects.toThrow('chat_id phải là mã c_')
+    await expect(t.readChat({ chat_id: '' })).rejects.toThrow('hoặc mã c_')
     expect(g.calls).toHaveLength(0)
   })
 
