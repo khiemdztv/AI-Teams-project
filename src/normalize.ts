@@ -103,6 +103,8 @@ export function normalize(input: NormalizeInput): ChannelNotification {
   if (input.role) put(meta, 'role', input.role)
   if (input.force) put(meta, 'force', 'true')
   if (conversationType !== 'personal') put(meta, 'dm_conversation_id', input.dmConversationId)
+  // Fork (18/11): a Teams meeting's chat; meeting_transcript works here.
+  if (a.channelData?.meeting?.id) put(meta, 'meeting_chat', 'true')
   put(meta, 'tenant_id', a.channelData?.tenant?.id ?? a.conversation?.tenantId)
   put(meta, 'ts', a.timestamp ?? new Date().toISOString())
 

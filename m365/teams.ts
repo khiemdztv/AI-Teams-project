@@ -41,6 +41,8 @@ const GRAPH = 'https://graph.microsoft.com/v1.0'
 const MAX_CHATS = 50
 const MAX_TEAMS = 20
 const MAX_PEOPLE = 20
+/** Teams caps a group chat name at 250 characters. */
+const MAX_TOPIC = 250
 /** Teams refuses a message much longer than this; keep it readable anyway. */
 export const MAX_MESSAGE_CHARS = 8000
 const PLAN_TTL_MS = 30 * 60 * 1000
@@ -95,7 +97,7 @@ type ReadInput = { since?: string; until?: string; top?: number; search?: string
 /** One message (or a post with its replies) as text, and the pictures it holds. */
 type Block = { at: number; text: string; count: number; images: { code: string; path: string; key: string }[] }
 
-type Member = { displayName?: string; email?: string; userId?: string }
+type Member = { id?: string; displayName?: string; email?: string; userId?: string }
 type Chat = {
   id: string
   chatType?: string
@@ -532,6 +534,79 @@ export class TeamsChats {
     }
     this.opts.log?.(`teams_add_member ${added.length} people`)
     return `Added to the ${plan.label}: ${added.join(', ')}.`
+  }
+
+  /**
+   * Fork (18/11): rename a group chat the sender is in, as the sender. One step:
+   * a new name changes nothing outside the chat and Teams shows who renamed it.
+   * Needs Chat.ReadWrite, already granted (29/10).
+   */
+  async renameChat(input: { chat_id: string; topic: string }): Promise<string> {
+    const chatId = this.chatIdOf(String(input.chat_id ?? '').trim())
+    const topic = String(input.topic ?? '').replace(/\s+/g, ' ').trim()
+    if (!topic) throw new Error('topic is required: the new name of the group chat')
+    if (topic.length > MAX_TOPIC) throw new Error(`the name is too long (${topic.length} characters, at most ${MAX_TOPIC})`)
+    // Through /me: only a chat the sender is in.
+    const chat = (await this.graph('GET', `/me/chats/${encodeURIComponent(chatId)}`)) as Chat
+    if (chat.chatType !== 'group') throw new Error('only a group chat can be renamed; a 1:1 or meeting chat has no name to change')
+    if (chat.topic === topic) return `The group chat is already named "${topic}".`
+    await this.graph('PATCH', `/chats/${encodeURIComponent(chatId)}`, { topic })
+    this.opts.log?.('teams_rename_chat')
+    return `Renamed the group chat${chat.topic ? ` from "${chat.topic}"` : ''} to "${topic}". Teams shows that the sender renamed it.`
+  }
+
+  /**
+   * Fork (18/11): remove people from a group chat the sender is in, as the
+   * sender, in one step. People are matched against the chat's own members
+   * first (email, or a name as the sender said it, accents ignored), so
+   * "Daniel" means the Daniel in this chat; several matches fail with the list.
+   * The sender cannot remove themself. Needs Chat.ReadWrite (29/10).
+   */
+  async removeMembers(input: { chat_id: string; people: string[] }): Promise<string> {
+    const chatId = this.chatIdOf(String(input.chat_id ?? '').trim())
+    const wanted = (input.people ?? []).map(p => String(p).trim()).filter(Boolean)
+    if (!wanted.length) throw new Error('people is required: who to remove, by name or email')
+    if (wanted.length > MAX_PEOPLE) throw new Error(`at most ${MAX_PEOPLE} people at once`)
+    const me = await this.me()
+    const chat = (await this.graph('GET', `/me/chats/${encodeURIComponent(chatId)}?$expand=members`)) as Chat
+    if (chat.chatType !== 'group') throw new Error('people can only be removed from a group chat')
+    const members = (chat.members ?? []).filter(m => m.id && m.userId)
+    const fold = (s: string) =>
+      s.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().trim()
+    const label = (m: Member) => `${m.displayName ?? '?'}${m.email ? ` <${m.email}>` : ''}`
+
+    const chosen = new Map<string, Member>()
+    for (const entry of wanted) {
+      const key = fold(entry)
+      let hits = members.filter(m =>
+        entry.includes('@') ? fold(m.email ?? '') === key : fold(m.displayName ?? '').includes(key) || fold(m.email ?? '').split('@')[0] === key,
+      )
+      if (!hits.length) {
+        // Not matched by name in the chat: try the directory, then check membership.
+        const user = await this.person(entry)
+        hits = members.filter(m => m.userId === user.id)
+        if (!hits.length) throw new Error(`${user.name} <${user.email}> is not in this chat`)
+      }
+      if (hits.length > 1) throw new Error(`"${entry}" matches several people in this chat: ${hits.map(label).join('; ')}. Ask which.`)
+      const hit = hits[0]!
+      if (hit.userId === me.id) throw new Error('the sender cannot remove themself here; they can leave the chat in Teams')
+      chosen.set(hit.id!, hit)
+    }
+
+    const removed: string[] = []
+    for (const m of chosen.values()) {
+      try {
+        await this.graph('DELETE', `/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(m.id!)}`)
+      } catch (err) {
+        throw new Error(
+          `${removed.length ? `removed ${removed.join(', ')}; ` : ''}NOT removed ${label(m)} or anyone after (${err instanceof Error ? err.message : 'failed'})`,
+        )
+      }
+      removed.push(label(m))
+    }
+    this.opts.log?.(`teams_remove_member ${removed.length} people`)
+    const where = `group chat${chat.topic ? ` "${chat.topic}"` : ''}`
+    return `Removed from the ${where}: ${removed.join(', ')}. Teams shows that the sender removed them.`
   }
 
   // -------------------------------------------------------------------------

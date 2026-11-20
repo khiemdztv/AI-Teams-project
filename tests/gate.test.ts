@@ -3,6 +3,9 @@ import {
   gate,
   outboundAllowed,
   mentionsBot,
+  DEFAULT_CALL_PATTERNS,
+  callPatterns,
+  isUnaddressedGroupMessage,
   normalizeConversationId,
   normalizeSenderId,
   DEFAULT_ACCESS,
@@ -372,5 +375,43 @@ describe('mention detection', () => {
 
   test('no recipient id means no mention can be confirmed', () => {
     expect(mentionsBot([{ type: 'mention', mentioned: { id: BOT } }], undefined)).toBe(false)
+  })
+})
+
+describe('calling the bot without @ (18/11)', () => {
+  const calls = (text: string) => mentionsBot(undefined, '28:bot', text, DEFAULT_CALL_PATTERNS)
+
+  test('a message starting with the call counts', () => {
+    for (const text of ['agent ơi, xóa Daniel khỏi nhóm', 'Agent ơi xóa Daniel', 'Agent, đổi tên nhóm', 'agent: tóm tắt', 'Fabrikam Agent đổi tên nhóm', '  agent oi giúp em'])
+      expect(calls(text)).toBe(true)
+  })
+
+  test('the word in passing does not', () => {
+    for (const text of ['agent của khách hàng gửi hồ sơ', 'gửi cho agent bên kia', 'Agents đã ký', 'ok anh', ''])
+      expect(calls(text)).toBe(false)
+  })
+
+  test("the operator's patterns replace the defaults", () => {
+    expect(callPatterns({})).toEqual(DEFAULT_CALL_PATTERNS)
+    expect(callPatterns({ mentionPatterns: ['^bot\\b'] })).toEqual(['^bot\\b'])
+    expect(callPatterns({ mentionPatterns: [] })).toEqual([])
+  })
+
+  test('only a group message that calls nobody is dropped before the queue', () => {
+    const group = (extra: object) => ({ conversation: { conversationType: 'groupChat' }, recipient: { id: '28:bot' }, ...extra })
+    expect(isUnaddressedGroupMessage(group({ text: 'họp lúc 3h nhé' }), DEFAULT_CALL_PATTERNS)).toBe(true)
+    expect(isUnaddressedGroupMessage(group({ text: 'agent ơi, họp lúc 3h' }), DEFAULT_CALL_PATTERNS)).toBe(false)
+    expect(
+      isUnaddressedGroupMessage(
+        group({ text: '<at>Fabrikam Agent</at> hi', entities: [{ type: 'mention', mentioned: { id: '28:bot' } }] }),
+        DEFAULT_CALL_PATTERNS,
+      ),
+    ).toBe(false)
+    // a channel message (RSC ChannelMessage.Read.Group) is dropped the same way
+    const channel = (text: string) => ({ conversation: { conversationType: 'channel' }, recipient: { id: '28:bot' }, text })
+    expect(isUnaddressedGroupMessage(channel('họp lúc 3h nhé'), DEFAULT_CALL_PATTERNS)).toBe(true)
+    expect(isUnaddressedGroupMessage(channel('Agent, tóm tắt channel'), DEFAULT_CALL_PATTERNS)).toBe(false)
+    // 1:1 chats are never dropped here, whatever they say
+    expect(isUnaddressedGroupMessage({ conversation: { conversationType: 'personal' }, text: 'hi' }, DEFAULT_CALL_PATTERNS)).toBe(false)
   })
 })

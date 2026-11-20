@@ -2,15 +2,36 @@ import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
 import { readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import { stateDir } from '../src/state.js'
+import { stateDir, sharedDir } from '../src/state.js'
 
 let saved: string | undefined
+let savedRoot: string | undefined
 beforeEach(() => {
   saved = process.env.MSTEAMS_STATE_DIR
+  savedRoot = process.env.MSTEAMS_ROOT_DIR
 })
 afterEach(() => {
   if (saved === undefined) delete process.env.MSTEAMS_STATE_DIR
   else process.env.MSTEAMS_STATE_DIR = saved
+  if (savedRoot === undefined) delete process.env.MSTEAMS_ROOT_DIR
+  else process.env.MSTEAMS_ROOT_DIR = savedRoot
+})
+
+describe('shared dir (fork, 20/11)', () => {
+  test('unset, it is the state dir itself: the single-session layout', () => {
+    delete process.env.MSTEAMS_ROOT_DIR
+    process.env.MSTEAMS_STATE_DIR = '/root-state'
+    expect(sharedDir()).toBe('/root-state')
+    delete process.env.MSTEAMS_STATE_DIR
+    expect(sharedDir()).toBe(stateDir())
+  })
+
+  test("MSTEAMS_ROOT_DIR points a person's session at the root", () => {
+    process.env.MSTEAMS_STATE_DIR = '/root-state/workers/an'
+    process.env.MSTEAMS_ROOT_DIR = '/root-state'
+    expect(stateDir()).toBe('/root-state/workers/an')
+    expect(sharedDir()).toBe('/root-state')
+  })
 })
 
 describe('state dir resolution', () => {

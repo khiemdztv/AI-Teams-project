@@ -13,9 +13,16 @@
  *
  * A turn the hook never closes (an interrupt in the terminal fires no Stop
  * hook) is released after MAX_TURN_MS, so the bot cannot stay locked.
+ *
+ * Fork (20/11): a message that arrives mid-turn is no longer refused but
+ * queued in the listener (src/turn-queue.ts) and started when this lock is
+ * released. Each lock carries a `turnId` that the channel notification repeats
+ * as meta turn_id, so the Stop hook can tell the Teams turn from another turn
+ * that ended first (see transcriptHasTurn()).
  */
 
-import { readFileSync, writeFileSync, rmSync, renameSync } from 'fs'
+import { readFileSync, writeFileSync, rmSync, renameSync, openSync, readSync, fstatSync, closeSync } from 'fs'
+import { randomBytes } from 'crypto'
 import { join } from 'path'
 
 export const TURN_LOCK_FILE = 'turn.json'
@@ -49,6 +56,109 @@ export type TurnLock = {
   force?: boolean
   /** The "⏳" status message, edited to "✅" when the turn ends. */
   statusMessageId?: string
+  /**
+   * Fork (18/11): where the status lines go, kept in memory only (set after
+   * the lock is written). Absent: the turn's own conversation. null: nowhere.
+   * See statusTarget().
+   */
+  statusConversationId?: string | null
+  /**
+   * Fork (20/11): 8 hex chars, also sent to Claude as meta turn_id with the
+   * notification that starts the turn. Absent on locks from before 20/11.
+   */
+  turnId?: string
+}
+
+/** Fork (20/11): a fresh id for a turn: 8 random hex chars. */
+export function newTurnId(): string {
+  return randomBytes(4).toString('hex')
+}
+
+/** How much of the transcript's tail is read first when looking for a turn id. */
+export const TRANSCRIPT_TAIL_BYTES = 512 * 1024
+/** Never read further back than this, however long the transcript is. */
+export const TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024
+
+/**
+ * Fork (20/11): whether `text` holds the channel tag attribute turn_id="<id>",
+ * as the transcript (JSONL, so the quotes are usually escaped) records it.
+ */
+export function mentionsTurn(text: string, turnId: string): boolean {
+  if (!/^[0-9a-f]{8}$/.test(turnId)) return false
+  return new RegExp(`turn_id=\\\\*"${turnId}\\\\*"`).test(text)
+}
+
+/**
+ * Fork (20/11): whether the transcript at `path` already holds the channel
+ * message of turn `turnId`. A background subagent finishing, for one, makes the
+ * idle session run a turn of its own, and its Stop must not close a Teams turn
+ * whose message Claude Code is still holding back for the next turn.
+ *
+ * Reads the last TRANSCRIPT_TAIL_BYTES first; when the id is not there and the
+ * file is longer, looks further back in chunks up to TRANSCRIPT_MAX_BYTES, so a
+ * long Teams turn whose tool output pushed its own message out of the tail is
+ * still recognised. The id is random, so reading more can only find the right
+ * turn, never a wrong one. Returns null when the file cannot be read: the caller
+ * then behaves as before 20/11.
+ */
+export function transcriptHasTurn(path: string, turnId: string): boolean | null {
+  let fd: number
+  try {
+    fd = openSync(path, 'r')
+  } catch {
+    return null
+  }
+  try {
+    const size = fstatSync(fd).size
+    const overlap = 64
+    let end = size
+    let chunk = TRANSCRIPT_TAIL_BYTES
+    while (end > 0 && size - end < TRANSCRIPT_MAX_BYTES) {
+      const start = Math.max(0, end - chunk)
+      const readEnd = Math.min(size, end + overlap)
+      const buf = Buffer.alloc(readEnd - start)
+      readSync(fd, buf, 0, buf.length, start)
+      if (mentionsTurn(buf.toString('utf8'), turnId)) return true
+      end = start
+      chunk = TRANSCRIPT_TAIL_BYTES * 2
+    }
+    return false
+  } catch {
+    return null
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {}
+  }
+}
+
+/**
+ * Fork (20/11): the Stop hook leaves the lock alone (no clearing, no nudge) when
+ * the lock names a turn the transcript does not show yet. A lock without a
+ * turnId, or a transcript that cannot be read, behaves as before.
+ */
+export function stopIsForOtherTurn(lock: TurnLock | null, transcriptPath: unknown): boolean {
+  if (!lock?.turnId || typeof transcriptPath !== 'string' || !transcriptPath) return false
+  return transcriptHasTurn(transcriptPath, lock.turnId) === false
+}
+
+/**
+ * Fork (18/11): where "⏳/✅" and busy notices for a message go. In a group
+ * chat they are internal reports, so they go to the sender's own 1:1 chat with
+ * the bot, or nowhere when there is none; elsewhere, to the conversation itself.
+ */
+export function statusTarget(
+  conversationType: string | undefined,
+  conversationId: string,
+  dmConversationId: string | undefined,
+): string | null {
+  if (conversationType !== 'groupChat') return conversationId
+  return dmConversationId ?? null
+}
+
+/** The conversation `lock`'s status lines go to, or null for none. */
+export function statusConversationOf(lock: TurnLock): string | null {
+  return lock.statusConversationId === undefined ? lock.conversationId : lock.statusConversationId
 }
 
 export function turnLockPath(stateDir: string): string {
@@ -80,6 +190,42 @@ export function clearTurnLock(stateDir: string): boolean {
   }
 }
 
+/**
+ * Fork (18/11): a turn that ends without `reply` leaves the sender with only
+ * "✅ Xong": the answer was printed to the terminal, which Teams never sees.
+ * The listener records here the `since` of the turn whose reply went out, and
+ * the Stop hook (hooks/turn-done.ts) sends Claude back once to reply when it
+ * does not match. A separate file, so turn.json is still written only once.
+ */
+export const REPLIED_FILE = 'turn-replied'
+
+export const NO_REPLY_NUDGE =
+  'Lượt này chưa có gì tới Teams: người nhắn chỉ thấy "✅ Xong". Văn bản in ra terminal không tới được Teams. ' +
+  'Gọi công cụ reply của msteams để gửi câu trả lời (conversation_id của tin vừa nhận, hoặc dm_conversation_id cho báo cáo riêng trong chat nhóm), rồi mới kết thúc.'
+
+export function markReplied(stateDir: string, since: number): void {
+  try {
+    writeFileSync(join(stateDir, REPLIED_FILE), String(since), { mode: 0o600 })
+  } catch {}
+}
+
+export function repliedSince(stateDir: string): number | null {
+  try {
+    const n = Number(readFileSync(join(stateDir, REPLIED_FILE), 'utf8').trim())
+    return Number.isFinite(n) ? n : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Whether the Stop hook should send Claude back to reply: a Teams turn is open,
+ * nothing was replied in it, and this stop is not already the one after a nudge.
+ */
+export function shouldNudgeReply(lock: TurnLock | null, replied: number | null, stopHookActive: boolean): boolean {
+  return !!lock && !stopHookActive && replied !== lock.since
+}
+
 export function isStale(lock: TurnLock, now = Date.now()): boolean {
   return now - lock.since > MAX_TURN_MS
 }
@@ -88,7 +234,8 @@ function clock(ms: number, timeZone?: string): string {
   return new Date(ms).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', timeZone })
 }
 
-export const STATUS_WORKING = '⏳ Đang xử lý… Tin nhắn mới sẽ chưa được nhận cho tới khi có dòng ✅ Xong.'
+// Fork (20/11): messages sent meanwhile are queued now, not refused.
+export const STATUS_WORKING = '⏳ Đang xử lý… Tin nhắn mới gửi lúc này sẽ được xếp hàng, làm sau khi có dòng ✅ Xong.'
 
 /** How often the "⏳" line is rewritten with the time spent so far. */
 export const STATUS_TICK_MS = 60 * 1000
@@ -108,10 +255,13 @@ export function formatWorking(lock: TurnLock, now = Date.now()): string {
     return minutes < 1 ? USER_WORKING : `Dạ, em vẫn đang làm (đã ${minutes} phút), xin đợi em thêm một chút.`
   }
   if (minutes < 1) return STATUS_WORKING
-  return `⏳ Đang xử lý… (đã ${minutes} phút). Tin nhắn mới sẽ chưa được nhận cho tới khi có dòng ✅ Xong.`
+  return `⏳ Đang xử lý… (đã ${minutes} phút). Tin nhắn mới gửi lúc này sẽ được xếp hàng, làm sau khi có dòng ✅ Xong.`
 }
 
-/** To someone whose message arrived mid-turn; `role` is theirs, not the turn's. */
+/**
+ * To someone whose message arrived mid-turn; `role` is theirs, not the turn's.
+ * Fork (20/11): only when the waiting line is full (src/turn-queue.ts).
+ */
 export function formatBusyNotice(lock: TurnLock, timeZone?: string, role?: 'admin' | 'user'): string {
   if (role === 'user') {
     return 'Dạ, em đang làm dở yêu cầu trước nên chưa nhận được tin vừa rồi. Khi em báo xong, xin nhắn lại giúp em.'

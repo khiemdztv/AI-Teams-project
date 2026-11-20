@@ -16,7 +16,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { App } from '@microsoft/teams.apps'
 import { z } from 'zod'
-import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, appendFileSync } from 'fs'
 import { join, extname } from 'path'
 import { BunHttpAdapter } from './src/bun-adapter.js'
 import { IngressQueue } from './src/queue.js'
@@ -25,6 +25,8 @@ import {
   gate,
   outboundAllowed,
   mentionsBot,
+  callPatterns,
+  isUnaddressedGroupMessage,
   normalizeSenderId,
   normalizeConversationId,
   roleOf,
@@ -56,7 +58,18 @@ import { normalize } from './src/normalize.js'
 import { AttachmentHandles, downloadHostsFromEnv, sharedFiles } from './src/attachments.js'
 import { loadEnvFile } from './src/env.js'
 import { react, GRAPH_REACTIONS } from './src/graph.js'
-import { stateDir } from './src/state.js'
+import { stateDir, sharedDir } from './src/state.js'
+import { TurnQueue, formatQueuedNotice } from './src/turn-queue.js'
+import {
+  ownerFromEnv,
+  refusedNotOwner,
+  ownerOutboundRefusal,
+  routesPermissions,
+  writePermissionRoute,
+  removePermissionRoute,
+  clearOwnPermissionRoutes,
+} from './src/owner.js'
+import { readWorkers, ownsJob } from './src/workers.js'
 import { purgeOlderThan, INBOX_TTL_MS } from './src/purge.js'
 import { isOfficeFile, officeToText } from './src/office-text.js'
 import { buildPdfHtml, pdfFileName, printHtmlToPdf } from './src/pdf.js'
@@ -72,8 +85,15 @@ import {
   formatDone,
   formatWorking,
   formatTimedOut,
+  statusTarget,
+  statusConversationOf,
+  markReplied,
+  newTurnId,
   STATUS_TICK_MS,
 } from './src/turn-lock.js'
+import { GroupHandoffs } from './src/group-handoff.js'
+import { MeetingChats, fetchMeetingTranscript } from './src/meeting-transcript.js'
+import { matchMembers, sendActivity, callLink, memberEmail, ACTIVITY_KINDS, MAX_TASK, type ActivityKind } from './src/activity-notify.js'
 import { PendingUploadStore } from './src/pending-uploads.js'
 import { handleFileConsentInvoke, uploadToConsentUrl } from './src/file-consent.js'
 import {
@@ -101,17 +121,21 @@ import { loadConfig as loadM365Config } from './m365/config.js'
 import { UserAuths, tokenPath } from './m365/users.js'
 
 const STATE_DIR = stateDir()
+// Fork (20/11): with one session per person, credentials, access, schedules and
+// conversation references live once, in the root dir; this session's own turn,
+// queue, inbox and logs stay in STATE_DIR. Unset MSTEAMS_ROOT_DIR: the same dir.
+const SHARED_DIR = sharedDir()
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const QUEUE_DIR = join(STATE_DIR, 'queue')
-const CONVERSATIONS_DIR = join(STATE_DIR, 'conversations')
-const APPROVED_DIR = join(STATE_DIR, 'approved')
+const CONVERSATIONS_DIR = join(SHARED_DIR, 'conversations')
+const APPROVED_DIR = join(SHARED_DIR, 'approved')
 const PENDING_DIR = join(STATE_DIR, 'pending-uploads')
-const ENV_FILE = join(STATE_DIR, '.env')
+const ENV_FILE = join(SHARED_DIR, '.env')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
 
 // 0700 throughout: the state dir holds Entra credentials and conversation
 // references, both of which grant the ability to post as the bot.
-for (const dir of [STATE_DIR, INBOX_DIR, QUEUE_DIR, CONVERSATIONS_DIR, APPROVED_DIR, PENDING_DIR]) {
+for (const dir of [SHARED_DIR, STATE_DIR, INBOX_DIR, QUEUE_DIR, CONVERSATIONS_DIR, APPROVED_DIR, PENDING_DIR]) {
   mkdirSync(dir, { recursive: true, mode: 0o700 })
 }
 
@@ -133,6 +157,10 @@ const WEBHOOK_HOST = process.env.MSTEAMS_WEBHOOK_HOST ?? '127.0.0.1'
 const SHAREPOINT_SITE_ID = process.env.MSTEAMS_SHAREPOINT_SITE_ID
 // Fork addition: the only folder files may be sent from. Unset = no file sends.
 const SENDABLE_ROOT = process.env.MSTEAMS_SENDABLE_ROOT || undefined
+// Fork (20/11): set in a person's own session; see src/owner.ts. Unset: everyone allowed, as before.
+const BOT_OWNER = ownerFromEnv()
+// Fork (20/11): whether relayed permission prompts are registered for the router.
+const ROUTE_PERMISSIONS = routesPermissions()
 
 /**
  * Whether `pid` is a Bun process (fork addition). After a reboot the pid in
@@ -221,7 +249,16 @@ const pendingPermissions = new PendingPermissions()
  */
 const delegatedPermissions = new Map<string, { senderId: string; senderName?: string; toolName: string }>()
 
+/**
+ * Fork (20/11): drop the router's note of where `requestId`'s verdict goes,
+ * once the request is taken, withdrawn or expired.
+ */
+function unroutePermission(requestId: string): void {
+  if (ROUTE_PERMISSIONS) removePermissionRoute(SHARED_DIR, requestId)
+}
+
 function denyOnBehalf(requestId: string, why: string): void {
+  unroutePermission(requestId)
   const asker = delegatedPermissions.get(requestId)
   delegatedPermissions.delete(requestId)
   void mcp.notification({
@@ -326,6 +363,13 @@ mcp.setNotificationHandler(
     process.stderr.write(
       `msteams channel: permission_request ${request_id} (${safeTool}) → ${targets.length} DM(s)\n`,
     )
+
+    // Fork (20/11): the approver's "y <code>" reaches the router first, which
+    // sends it to whichever session holds this note: this one. Removed when the
+    // request is taken or withdrawn, and at the latest when it expires.
+    if (ROUTE_PERMISSIONS && targets.length > 0 && writePermissionRoute(SHARED_DIR, request_id, WEBHOOK_PORT)) {
+      setTimeout(() => unroutePermission(request_id), Math.max(0, expiresAt - Date.now()) + 1000).unref?.()
+    }
 
     for (const ref of targets) {
       void sendPlain(ref.conversationId, text, err =>
@@ -461,6 +505,44 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'meeting_transcript',
+      description:
+        'Fetch the transcript of the Teams meeting whose meeting chat the current message came from (meta meeting_chat="true"), after the meeting ended and only if transcription was on. Saves it as a text file ("[hh:mm:ss] Name: text" lines) and returns the path: Read it, then summarize. conversation_id defaults to the current conversation; from the sender\'s 1:1 chat it may be the meeting chat they tagged the bot in within the last 60 minutes.',
+      inputSchema: {
+        type: 'object',
+        properties: { conversation_id: { type: 'string', description: 'The meeting chat; omit for the current conversation' } },
+      },
+    },
+    {
+      name: 'notify_activity',
+      description:
+        `Ring people in a group chat through their Teams Activity (the bell), since the bot cannot @mention: kind "taskAssigned" shows "<sender> giao việc cho bạn: <task>", "reminder" shows "<sender> nhắc bạn: <task>"; clicking opens the chat. people by name as the sender said it or by email, only members of that chat (several matches fail with the list: ask which); ["all"] is everyone in the chat but the sender. task at most ${MAX_TASK} characters, the details go in the chat message. conversation_id defaults to the current group chat; from the sender's 1:1 chat it may be the group they tagged the bot in within 60 minutes.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          conversation_id: { type: 'string', description: 'The group chat; omit for the current conversation' },
+          people: { type: 'array', items: { type: 'string' } },
+          kind: { type: 'string', enum: [...ACTIVITY_KINDS] },
+          task: { type: 'string' },
+        },
+        required: ['people', 'kind', 'task'],
+      },
+    },
+    {
+      name: 'call_link',
+      description:
+        'A Teams link that starts an audio or video call from the account of whoever clicks it (Graph cannot place a call as a user). Send it to the sender as a button with reply links, e.g. [{"title": "📹 Gọi video cho Jimmy", "url": <link>}]. people: in a group chat, names as said or emails, matched against that chat\'s members; in a 1:1 chat, colleagues\' emails. video defaults to true; several people make a group call. Sends nothing itself.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          people: { type: 'array', items: { type: 'string' } },
+          video: { type: 'boolean' },
+          conversation_id: { type: 'string', description: 'The group chat to match names in; omit for the current conversation' },
+        },
+        required: ['people'],
+      },
+    },
+    {
       name: 'log_internal',
       description:
         'Write a technical note for the developers to a log file on the bot machine; nothing is sent to Teams. When the sender\'s role is "user", put tool errors, file paths, tool names and other technical detail here instead of in your reply, and tell the sender only what it means for them.',
@@ -519,11 +601,137 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
   const ok = (text: string) => ({ content: [{ type: 'text' as const, text }] })
   const turn = activeTurn && !isStale(activeTurn) ? activeTurn : null
+  // Fork (20/11): in a person's own session (BOT_OWNER), 1:1 chats are only the
+  // owner's, and with no turn running only the owner's own 1:1 chat at all.
+  // Null when allowed, and always null without BOT_OWNER.
+  const ownerRefused = (ref: { conversationType: string; senderId?: string }) => {
+    const why = ownerOutboundRefusal(BOT_OWNER, ref, !!turn)
+    if (why) process.stderr.write(`msteams channel: outbound refused (${req.params.name}): owner mode\n`)
+    return why ? fail(`refused: ${why}`) : null
+  }
 
   // Fork (05/11): a scheduled job only reads (src/scheduled-guard.ts).
   if (turn?.scheduled && !MSTEAMS_SCHEDULED_TOOLS.has(req.params.name)) return fail(SCHEDULED_REFUSAL)
 
   // Fork addition: touches no conversation and no network, only local folders.
+  // Fork (18/11): a meeting's transcript, through the meeting chat's RSC grant.
+  if (req.params.name === 'meeting_transcript') {
+    if (!turn) return fail('meeting_transcript only works while answering a Teams message')
+    if (!teamsApp) return fail('the channel is running without credentials')
+    const convId = normalizeConversationId(String(args.conversation_id ?? '') || turn.conversationId)
+    const mine =
+      convId === turn.conversationId ||
+      groupHandoffs.allows(turn, convId, turn.senderId ? dmOf(turn.senderId, loadAccess()) : undefined)
+    if (!mine) return fail('refused: only the meeting chat this message came from, or the one the sender tagged the bot in within 60 minutes')
+    const ref = conversations.get(convId)
+    if (!ref || !outboundAllowed(ref, loadAccess()).allowed) return fail('refused: that chat is not one the bot may answer')
+    const notMine = ownerRefused(ref)
+    if (notMine) return notMine
+    const meetingId = meetingChats.meetingOf(convId)
+    if (!meetingId) {
+      return fail('not a meeting chat, or the bot has restarted since it was tagged there: tag the bot in the meeting\'s chat and ask again')
+    }
+    const app = teamsApp
+    try {
+      const r = await fetchMeetingTranscript(meetingId, {
+        getMeeting: id => app.api.meetings.getById(id) as any,
+        graphToken: graphTokenGetter(app.graph),
+        saveDir: INBOX_DIR,
+      })
+      process.stderr.write(`msteams channel: meeting_transcript ${r.transcripts} transcript(s), ${r.lines} lines\n`)
+      return ok(
+        [
+          `Saved the transcript of "${r.title}" to ${r.path}`,
+          `${r.lines} turns, ${r.transcripts} transcript(s); speakers: ${r.speakers.join(', ') || '?'}`,
+          'Read that file, then summarize. Do not paste the transcript itself into Teams.',
+        ].join('\n'),
+      )
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // Fork (18/11): activity-feed notifications to members of a group chat.
+  if (req.params.name === 'notify_activity') {
+    if (!turn) return fail('notify_activity only works while answering a Teams message')
+    if (!teamsApp) return fail('the channel is running without credentials')
+    const convId = normalizeConversationId(String(args.conversation_id ?? '') || turn.conversationId)
+    const mine =
+      convId === turn.conversationId ||
+      groupHandoffs.allows(turn, convId, turn.senderId ? dmOf(turn.senderId, loadAccess()) : undefined)
+    if (!mine) return fail('refused: only the group chat this message came from, or the one the sender tagged the bot in within 60 minutes')
+    const ref = conversations.get(convId)
+    if (!ref || ref.conversationType !== 'groupChat') return fail('refused: activity notifications go to members of a group chat the bot is in')
+    if (!outboundAllowed(ref, loadAccess()).allowed) return fail('refused: that chat is not one the bot may answer')
+    const notMine = ownerRefused(ref)
+    if (notMine) return notMine
+    const app = teamsApp
+    try {
+      const members = (await app.api.conversations.getMembers(convId)) as any[]
+      const recipients = matchMembers(members, Array.isArray(args.people) ? args.people.map(String) : [], turn.senderId)
+      const text = await sendActivity(
+        {
+          chatId: convId,
+          recipients,
+          kind: String(args.kind ?? '') as ActivityKind,
+          task: String(args.task ?? ''),
+          by: turn.senderName ?? '',
+        },
+        {
+          graphToken: graphTokenGetter(app.graph),
+          teamsAppId: TEAMS_APP_ID,
+          // Fork (18/11): stderr is invisible mid-session; keep each Graph answer for the operator.
+          trace: tr => {
+            try {
+              mkdirSync(join(STATE_DIR, 'logs'), { recursive: true, mode: 0o700 })
+              appendFileSync(
+                join(STATE_DIR, 'logs', 'notify.jsonl'),
+                JSON.stringify({ at: new Date().toISOString(), kind: String(args.kind ?? ''), chat: convId.slice(0, 24), ...tr }) + '\n',
+                { mode: 0o600 },
+              )
+            } catch {}
+          },
+        },
+      )
+      process.stderr.write(`msteams channel: notify_activity ${recipients.length} people\n`)
+      return ok(text)
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  // Fork (19/11): a call deep link; it reaches nobody until the sender clicks it.
+  if (req.params.name === 'call_link') {
+    if (!turn) return fail('call_link only works while answering a Teams message')
+    const people = Array.isArray(args.people) ? args.people.map(String) : []
+    const video = args.video !== false
+    try {
+      const convId = normalizeConversationId(String(args.conversation_id ?? '') || turn.conversationId)
+      const ref = conversations.get(convId)
+      const notMine = ref ? ownerRefused(ref) : null
+      if (notMine) return notMine
+      const mine =
+        convId === turn.conversationId ||
+        groupHandoffs.allows(turn, convId, turn.senderId ? dmOf(turn.senderId, loadAccess()) : undefined)
+      let emails: string[]
+      let names: string[]
+      if (ref?.conversationType === 'groupChat' && mine && teamsApp) {
+        const members = (await teamsApp.api.conversations.getMembers(convId)) as any[]
+        const hit = matchMembers(members, people, turn.senderId)
+        emails = hit.map(memberEmail)
+        names = hit.map(m => String(m.name ?? memberEmail(m)))
+      } else {
+        emails = people.filter(p => p.includes('@'))
+        if (emails.length !== people.length) return fail('outside a group chat, give the people to call by email (find them with teams_list_chats or ask the sender)')
+        names = emails
+      }
+      const url = callLink(emails, video)
+      return ok(`${video ? 'Video' : 'Audio'} call link for ${names.join('; ')}:\n${url}\nSend it to the sender as a reply button; the call starts from their account when they click it.`)
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   if (req.params.name === 'log_internal') {
     const text = String(args.text ?? '').trim()
     if (!text) return fail('text is required')
@@ -601,6 +809,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       const ref = conversations.get(turn.conversationId)
       if (!ref || !outboundAllowed(ref, loadAccess()).allowed) return fail('refused: this chat cannot be messaged later')
+      const notMine = ownerRefused(ref)
+      if (notMine) return notMine
       // Fork (17/11): the notice and any task are the sender's own business.
       if (ref.conversationType !== 'personal') {
         return fail('refused: Outlook is watched only from the sender\'s 1:1 chat with the bot; ask them to request it there')
@@ -660,6 +870,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     return fail('refused: no inbound conversation on record for that conversation_id')
   }
 
+  // Fork (20/11): owner mode (src/owner.ts), before every other outbound rule.
+  const notMine = ownerRefused(ref)
+  if (notMine) return notMine
+
   // Fork (05/11): a scheduled job answers its own person, in their own chat only.
   if (turn?.scheduled && ref.conversationId !== turn.conversationId) {
     process.stderr.write(`msteams channel: outbound refused (${req.params.name}): scheduled job, other conversation\n`)
@@ -670,7 +884,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   // Everyone in it reads the answer, so a turn for one person's 1:1 (their mail,
   // their calendar) must never be able to post into a group, nor a group's turn
   // into another group.
-  if (ref.conversationType !== 'personal' && ref.conversationId !== turn?.conversationId) {
+  // Fork (18/11): one exception, the group the same person just tagged the bot
+  // from, answered from their own 1:1 chat (src/group-handoff.ts).
+  if (
+    ref.conversationType !== 'personal' &&
+    ref.conversationId !== turn?.conversationId &&
+    !(
+      ref.conversationType === 'groupChat' &&
+      groupHandoffs.allows(turn, ref.conversationId, turn?.senderId ? dmOf(turn.senderId, loadAccess()) : undefined)
+    )
+  ) {
     process.stderr.write(`msteams channel: outbound refused (${req.params.name}): group chat outside its own turn\n`)
     return fail('refused: a group chat is only answered while answering a message from that group')
   }
@@ -699,6 +922,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         text,
         textFormat,
       } as any)
+      if (turn) markReplied(STATE_DIR, turn.since)
       return ok(`edited ${messageId}`)
     } catch (err) {
       process.stderr.write(`msteams channel: edit failed: ${err}\n`)
@@ -790,6 +1014,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     // blind retry would repeat text rather than resume it.
     return fail(describeFailure(result.failed, result.offered))
   }
+  // Fork (18/11): the turn did reach Teams; the Stop hook reads this.
+  if (turn) markReplied(STATE_DIR, turn.since)
   return ok(describeDelivery(result))
 })
 
@@ -824,20 +1050,21 @@ const settledConsentInvokes = new Map<string, number>()
 // is read-only to the bot's Windows account), so nothing arriving from Teams or
 // from a prompt-injected session can add a sender while the bot runs.
 const STATIC = true
-const BOOT_ACCESS: Access | null = STATIC ? bootStaticAccess(STATE_DIR) : null
+// Fork (20/11): access.json is shared by every session (SHARED_DIR).
+const BOOT_ACCESS: Access | null = STATIC ? bootStaticAccess(SHARED_DIR) : null
 if (BOOT_ACCESS && BOOT_ACCESS.allowFrom.length === 0) {
   process.stderr.write(
-    `msteams channel: allowFrom is empty in ${join(STATE_DIR, 'access.json')} — every message will be refused\n`,
+    `msteams channel: allowFrom is empty in ${join(SHARED_DIR, 'access.json')} — every message will be refused\n`,
   )
 }
 
 function loadAccess(): Access {
-  return BOOT_ACCESS ?? readAccess(STATE_DIR)
+  return BOOT_ACCESS ?? readAccess(SHARED_DIR)
 }
 
 function persistAccess(a: Access): void {
   if (STATIC) return
-  saveAccess(STATE_DIR, a)
+  saveAccess(SHARED_DIR, a)
 }
 
 /**
@@ -862,15 +1089,61 @@ async function sendPlain(
 // Fork addition: the Teams request Claude is working on, if any. Mirrored to
 // turn.json so the Stop hook (another process) can end it. See src/turn-lock.ts.
 let activeTurn: TurnLock | null = null
+// Fork (18/11): groups handed to the person who tagged the bot there, so their
+// 1:1 "ok" can post in it. See src/group-handoff.ts.
+const groupHandoffs = new GroupHandoffs()
+// Fork (18/11): the meeting id each meeting chat's messages carry. See src/meeting-transcript.ts.
+const meetingChats = new MeetingChats()
+// Fork (18/11): the Teams app's org-catalog id (admin center -> Manage apps ->
+// Fabrikam Agent -> App ID), sent with activity notifications so they reach the
+// current app when an old upload shares the bot id. Not a secret; the .env can
+// override it after a re-upload changes it, or set it empty to send none.
+const TEAMS_APP_ID = process.env.MSTEAMS_TEAMS_APP_ID ?? '5f50f892-3ba1-416d-ad4d-ff53784ae038'
 // The last "⏳ (đã N phút)" edit still in flight. endTurn waits for it, so a
 // slow tick can never land on top of the "✅" that replaced it.
 let statusTick: Promise<unknown> = Promise.resolve()
 let lastTickAt = 0
 
+/** Fork (20/11): Claude is on a turn that has not timed out. */
+function busy(): boolean {
+  return !!activeTurn && !isStale(activeTurn)
+}
+
 /**
- * Claim the turn for a message, or refuse it with a notice if Claude is still
- * on the previous one. `activeTurn` is set before the first await, so two
- * messages dispatched back to back cannot both claim it.
+ * Fork (20/11): a Teams message waiting for the turn in progress. See
+ * src/turn-queue.ts. Everything the gate and the role checks decided on arrival
+ * is kept, so starting it later needs no second pass through them.
+ */
+type WaitingMessage = {
+  activity: Record<string, any>
+  conversationId: string
+  conversationType: ConversationType | undefined
+  senderId: string
+  role: 'admin' | 'user'
+  forced: boolean
+  statusTo: string | null
+  /** The id of the "⏳ Đã nhận" notice once posted; it becomes the working line. */
+  notice: Promise<string | undefined>
+  /** Settles the dispatch() that queued it, so its ingress entry is finished only then. */
+  settle: () => void
+}
+
+const turnQueue = new TurnQueue<WaitingMessage>()
+let pumping = false
+
+/**
+ * Fork (20/11): no turn running, nobody waiting and nobody being started.
+ * Scheduled jobs and Outlook-watch tasks start only then: people first.
+ */
+function idle(): boolean {
+  return !busy() && turnQueue.size === 0 && !pumping
+}
+
+/**
+ * Claim the turn for a message, a job or a watch task. Returns the new lock,
+ * or null when Claude is still on the previous turn (callers check first; a job
+ * just tries again on a later tick). `activeTurn` is set before the first
+ * await, so two messages dispatched back to back cannot both claim it.
  */
 async function beginTurn(
   conversationId: string,
@@ -879,16 +1152,16 @@ async function beginTurn(
   role: 'admin' | 'user',
   scheduled?: TurnLock['scheduled'],
   force?: boolean,
-): Promise<boolean> {
-  if (activeTurn && !isStale(activeTurn)) {
-    // A job finds the bot busy: no notice, it tries again on the next tick.
-    if (scheduled) return false
-    await sendPlain(conversationId, formatBusyNotice(activeTurn, undefined, role), err =>
-      process.stderr.write(`msteams channel: busy notice failed: ${err}\n`),
-    )
-    return false
-  }
-  if (activeTurn) await endTurn(formatTimedOut(activeTurn))
+  // Fork (18/11): where status lines go; see statusTarget(). Absent: conversationId.
+  statusTo: string | null = conversationId,
+  // Fork (20/11): the queued notice already posted for this message, edited into
+  // the working line instead of posting a second status message.
+  existingStatus?: Promise<string | undefined>,
+): Promise<TurnLock | null> {
+  if (busy()) return null
+  // Fork (20/11): a timed-out turn is replaced before the first await (it used
+  // to be closed first), so nothing can claim the turn in between.
+  const timedOut = activeTurn
 
   const lock: TurnLock = {
     since: Date.now(),
@@ -898,25 +1171,44 @@ async function beginTurn(
     ...(senderName ? { senderName } : {}),
     ...(scheduled ? { scheduled } : {}),
     ...(force ? { force: true } : {}),
+    // Fork (20/11): repeated as meta turn_id; see stopIsForOtherTurn().
+    turnId: newTurnId(),
   }
   activeTurn = lock
   // Written once, before Claude is notified, so no Stop for this turn can run
   // first. The status message id stays in memory: rewriting the file after the
   // send could resurrect a lock the hook had already cleared.
   writeTurnLock(STATE_DIR, lock)
-  if (teamsApp) {
-    try {
-      const sent: any = await teamsApp.send(conversationId, {
-        type: 'message',
-        text: formatWorking(lock),
-        textFormat: 'plain',
-      } as any)
-      if (sent?.id) lock.statusMessageId = String(sent.id)
-    } catch (err) {
-      process.stderr.write(`msteams channel: status message failed: ${err}\n`)
+  if (statusTo !== conversationId) lock.statusConversationId = statusTo
+  if (timedOut) await closeStatus(timedOut, formatTimedOut(timedOut))
+  if (teamsApp && statusTo) {
+    const reuse = existingStatus ? await existingStatus : undefined
+    if (reuse) {
+      try {
+        await teamsApp.api.conversations.updateActivity(statusTo, reuse, {
+          type: 'message',
+          text: formatWorking(lock),
+          textFormat: 'plain',
+        } as any)
+        lock.statusMessageId = reuse
+      } catch (err) {
+        process.stderr.write(`msteams channel: status edit failed: ${err}\n`)
+      }
+    }
+    if (!lock.statusMessageId) {
+      try {
+        const sent: any = await teamsApp.send(statusTo, {
+          type: 'message',
+          text: formatWorking(lock),
+          textFormat: 'plain',
+        } as any)
+        if (sent?.id) lock.statusMessageId = String(sent.id)
+      } catch (err) {
+        process.stderr.write(`msteams channel: status message failed: ${err}\n`)
+      }
     }
   }
-  return true
+  return lock
 }
 
 /** Close the active turn's status line with `text`. */
@@ -924,11 +1216,17 @@ async function endTurn(text: string): Promise<void> {
   const turn = activeTurn
   if (!turn) return
   activeTurn = null
-  if (!teamsApp) return
+  await closeStatus(turn, text)
+}
+
+/** Edit `turn`'s status line to `text`, or post `text` when it cannot be edited. */
+async function closeStatus(turn: TurnLock, text: string): Promise<void> {
+  const to = statusConversationOf(turn)
+  if (!teamsApp || !to) return
   await statusTick
   try {
     if (turn.statusMessageId) {
-      await teamsApp.api.conversations.updateActivity(turn.conversationId, turn.statusMessageId, {
+      await teamsApp.api.conversations.updateActivity(to, turn.statusMessageId, {
         type: 'message',
         text,
         textFormat: 'plain',
@@ -938,7 +1236,7 @@ async function endTurn(text: string): Promise<void> {
   } catch (err) {
     process.stderr.write(`msteams channel: status edit failed: ${err}\n`)
   }
-  await sendPlain(turn.conversationId, text, err =>
+  await sendPlain(to, text, err =>
     process.stderr.write(`msteams channel: status message failed: ${err}\n`),
   )
 }
@@ -972,7 +1270,7 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
         activity.entities,
         activity.recipient?.id,
         typeof activity.text === 'string' ? activity.text : undefined,
-        access.mentionPatterns,
+        callPatterns(access),
       ),
     },
     access,
@@ -1000,9 +1298,25 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
     return
   }
 
+  // Fork (20/11): a person's own session answers only that person (src/owner.ts).
+  // The router never sends anyone else here but an approver's "y <code>" for a
+  // prompt this session relayed to them, which is let through to the verdict
+  // intercept below and nowhere else.
+  const fromId = normalizeSenderId(String(activity.from?.aadObjectId ?? ''))
+  if (refusedNotOwner(BOT_OWNER, fromId)) {
+    const vote = conversationType === 'personal' ? parseVerdict(String(activity.text ?? '')) : undefined
+    if (!vote || !pendingPermissions.approversOf(vote.requestId).includes(fromId)) {
+      process.stderr.write(`msteams channel: refused inbound (not_owner) type=${conversationType}\n`)
+      appendRefusal(STATE_DIR, describeRefusal(activity, 'not_owner', TENANT_ID ?? ''))
+      return
+    }
+  }
+
   // Only store a conversation reference once the sender is trusted; otherwise
   // any stranger could seed a proactive-send target.
   conversations.upsert(activity)
+  // Fork (18/11): remember the meeting this chat belongs to, for meeting_transcript.
+  meetingChats.note(normalizeConversationId(String(activity.conversation?.id ?? '')), activity)
 
   // Fork (02/11): the role this message is handled with. /useransw lets an
   // admin be answered as a user; it can only lower a role, never raise one.
@@ -1036,6 +1350,8 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
     const voter = normalizeSenderId(String(activity.from?.aadObjectId ?? ''))
     const askedToo = pendingPermissions.approversOf(parsed.requestId).filter(id => id !== voter)
     const outcome = pendingPermissions.take(parsed.requestId, voter, conversationType)
+    // Fork (20/11): taken or expired, the router's note for it has done its job.
+    if (outcome === 'ok' || outcome === 'expired') unroutePermission(parsed.requestId)
     if (outcome === 'ok') {
       void mcp.notification({
         method: 'notifications/claude/channel/permission',
@@ -1093,17 +1409,145 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
   // Fork addition: one request at a time. After the verdict intercept, so a
   // "y <code>" still reaches the turn that is waiting on that approval; before
   // attachment registration, so a refused message's files are never fetched.
-  if (
-    !(await beginTurn(
-      normalizeConversationId(String(activity.conversation?.id ?? '')),
-      normalizeSenderId(String(activity.from?.aadObjectId ?? '')),
-      typeof activity.from?.name === 'string' ? activity.from.name : undefined,
-      role,
-      undefined,
-      forced !== undefined,
-    ))
+  const conversationId = normalizeConversationId(String(activity.conversation?.id ?? ''))
+  // Fork (18/11): in a group chat "⏳/✅" go to the sender's 1:1 chat, not the group.
+  const statusTo = statusTarget(
+    conversationType,
+    conversationId,
+    conversationType === 'groupChat' ? dmOf(senderId, access) : undefined,
   )
+  const waiting = {
+    activity,
+    conversationId,
+    conversationType,
+    senderId,
+    role,
+    forced: forced !== undefined,
+    statusTo,
+  }
+  // Fork (20/11): mid-turn, or behind others already waiting, the message joins
+  // the line instead of being refused. Decided with no await since the gate, so
+  // messages keep their order. Resolves once it was handed to Claude or dropped.
+  if (!idle()) return waitInLine(waiting)
+  const lock = await beginTurn(
+    conversationId,
+    senderId,
+    typeof activity.from?.name === 'string' ? activity.from.name : undefined,
+    role,
+    undefined,
+    waiting.forced,
+    statusTo,
+  )
+  if (!lock) return
+  await deliverTurn(waiting, lock, access)
+}
+
+/**
+ * Fork (20/11): put a message in line and tell the sender, once, at the status
+ * target. Over a limit: today's busy notice, and the message is dropped.
+ * Resolves when the message was handed to Claude or dropped.
+ */
+function waitInLine(w: Omit<WaitingMessage, 'notice' | 'settle'>): Promise<void> {
+  return new Promise<void>(resolve => {
+    const entry: WaitingMessage = { ...w, notice: Promise.resolve(undefined), settle: resolve }
+    const offer = turnQueue.offer(w.senderId, entry)
+    if (!offer.ok) {
+      process.stderr.write(`msteams channel: message not queued (${offer.reason})\n`)
+      const turn = activeTurn ?? { since: Date.now(), conversationId: w.conversationId }
+      if (!w.statusTo) return resolve()
+      void sendPlain(w.statusTo, formatBusyNotice(turn, undefined, w.role), err =>
+        process.stderr.write(`msteams channel: busy notice failed: ${err}\n`),
+      ).finally(resolve)
+      return
+    }
+    process.stderr.write(`msteams channel: message queued at ${offer.position}\n`)
+    if (teamsApp && w.statusTo) {
+      const app = teamsApp
+      const to = w.statusTo
+      entry.notice = (async () => {
+        try {
+          const sent: any = await app.send(to, {
+            type: 'message',
+            text: formatQueuedNotice(offer.position, w.role),
+            textFormat: 'plain',
+          } as any)
+          return sent?.id ? String(sent.id) : undefined
+        } catch (err) {
+          process.stderr.write(`msteams channel: queued notice failed: ${err}\n`)
+          return undefined
+        }
+      })()
+    }
+  })
+}
+
+/**
+ * Fork (20/11): start waiting messages, oldest first, while Claude is free.
+ * Called when a turn ends, and from the 1-second tick as a fallback.
+ */
+async function pumpQueue(): Promise<void> {
+  if (pumping) return
+  pumping = true
+  try {
+    while (!busy() && turnQueue.size > 0) {
+      const next = turnQueue.shift()!
+      try {
+        await startWaiting(next)
+      } catch (err) {
+        process.stderr.write(`msteams channel: queued message failed: ${err}\n`)
+      } finally {
+        next.settle()
+      }
+    }
+  } finally {
+    pumping = false
+  }
+}
+
+/**
+ * Fork (20/11): start one waiting message. The sender is checked again first,
+ * since access may have changed while it waited; a sender no longer allowed is
+ * dropped silently, like any refusal toward Teams. beginTurn is reached with no
+ * await, so nothing can take the turn in between.
+ */
+async function startWaiting(w: WaitingMessage): Promise<void> {
+  const access = loadAccess()
+  const allowed =
+    access.dmPolicy !== 'disabled' &&
+    access.allowFrom.some(id => normalizeSenderId(id) === w.senderId) &&
+    !refusedNotOwner(BOT_OWNER, w.senderId)
+  if (!allowed) {
+    process.stderr.write('msteams channel: queued message dropped: sender no longer allowed\n')
     return
+  }
+  const lock = await beginTurn(
+    w.conversationId,
+    w.senderId,
+    typeof w.activity.from?.name === 'string' ? w.activity.from.name : undefined,
+    w.role,
+    undefined,
+    w.forced,
+    w.statusTo,
+    w.notice,
+  )
+  if (!lock) return
+  await deliverTurn(w, lock, access)
+}
+
+/**
+ * Hand a message whose turn has begun to Claude: attachments, images, and the
+ * channel notification. Fork (20/11): split out of dispatch() so a queued
+ * message is delivered the same way when its turn comes.
+ */
+async function deliverTurn(
+  w: Pick<WaitingMessage, 'activity' | 'conversationType' | 'senderId' | 'role' | 'forced'>,
+  lock: TurnLock,
+  access: Access,
+): Promise<void> {
+  const { activity, conversationType, senderId, role } = w
+  if (conversationType === 'groupChat') {
+    groupHandoffs.note(senderId, normalizeConversationId(String(activity.conversation?.id ?? '')))
+  }
 
   // Register AFTER the gate, so a refused sender's download URLs are never held.
   const files = attachmentHandles.register(activity)
@@ -1130,18 +1574,21 @@ async function dispatch(activity: Record<string, any>): Promise<void> {
     }
   }
 
+  const params = normalize({
+    activity,
+    imagePaths,
+    attachments: files,
+    sharedFiles: shared,
+    role,
+    force: w.forced,
+    dmConversationId: conversationType === 'groupChat' ? dmOf(senderId, access) : undefined,
+  })
+  // Fork (20/11): the Stop hook looks for this in the transcript; see stopIsForOtherTurn().
+  if (lock.turnId) params.meta.turn_id = lock.turnId
   void mcp
     .notification({
       method: 'notifications/claude/channel',
-      params: normalize({
-        activity,
-        imagePaths,
-        attachments: files,
-        sharedFiles: shared,
-        role,
-        force: forced !== undefined,
-        dmConversationId: conversationType === 'groupChat' ? dmOf(senderId, access) : undefined,
-      }),
+      params,
     })
     .catch(err => {
       process.stderr.write(`msteams channel: failed to deliver inbound to Claude: ${err}\n`)
@@ -1157,17 +1604,24 @@ const scheduleErrorsSeen = new Set<string>()
 
 /** Start the next job that is due, if the bot is free. Called every 30 seconds. */
 async function runScheduledJobs(now = Date.now()): Promise<void> {
-  if (scheduling || !teamsApp || (activeTurn && !isStale(activeTurn))) return
+  // Fork (20/11): not while a message waits in line either; people first.
+  if (scheduling || !teamsApp || !idle()) return
   scheduling = true
   try {
-    const { jobs, errors } = readSchedules(STATE_DIR)
-    for (const e of errors) {
+    // Fork (20/11): schedules.json is shared; which jobs ran (schedule-state.json)
+    // is this session's own.
+    const { jobs, errors } = readSchedules(SHARED_DIR)
+    const { workers, errors: workerErrors } = readWorkers(SHARED_DIR)
+    for (const e of [...errors.map(e => `schedules.json: ${e}`), ...workerErrors.map(e => `workers.json: ${e}`)]) {
       if (scheduleErrorsSeen.has(e)) continue
       scheduleErrorsSeen.add(e)
-      process.stderr.write(`msteams channel: schedules.json: ${e}\n`)
+      process.stderr.write(`msteams channel: ${e}\n`)
     }
+    // Fork (20/11): a person's own session runs only their jobs; the shared one
+    // skips the jobs of people who have a session of their own (src/workers.ts).
+    const mine = jobs.filter(j => ownsJob(workers, BOT_OWNER, j.user))
     // One at a time: the next one starts on a later tick, once this turn ends.
-    const job = dueJobs(jobs, readRan(STATE_DIR), now)[0]
+    const job = dueJobs(mine, readRan(STATE_DIR), now)[0]
     if (job) await startJob(job, now)
   } catch (err) {
     process.stderr.write(`msteams channel: scheduled job failed: ${err}\n`)
@@ -1182,14 +1636,20 @@ async function startJob(job: Job, now: number): Promise<void> {
   // The same outbound gate as a reply: the person's own 1:1 chat with the bot,
   // on record and still allowed.
   const ref = conversations.list().find(r => r.conversationType === 'personal' && r.senderId === job.user)
-  const refused = !ref ? 'no 1:1 chat with the bot on record' : outboundAllowed(ref, access).allowed ? '' : 'no longer allowed'
+  const refused = !ref
+    ? 'no 1:1 chat with the bot on record'
+    : !outboundAllowed(ref, access).allowed
+      ? 'no longer allowed'
+      : // Fork (20/11): ownsJob() already kept only the owner's jobs; this is the belt.
+        ownerOutboundRefusal(BOT_OWNER, ref, false) ?? ''
   if (refused || !ref) {
     markRan(STATE_DIR, job.id, day)
     process.stderr.write(`msteams channel: scheduled job ${job.id} skipped: ${refused}\n`)
     return
   }
   const role = effectiveRole(roleOf(access, job.user), job.user, readViewAs(STATE_DIR))
-  if (!(await beginTurn(ref.conversationId, job.user, undefined, role, job.kind))) return
+  const lock = await beginTurn(ref.conversationId, job.user, undefined, role, job.kind)
+  if (!lock) return
   // Marked before Claude is told, so a crash mid-job never runs it twice.
   markRan(STATE_DIR, job.id, day)
   process.stderr.write(`msteams channel: scheduled job ${job.id} started\n`)
@@ -1205,6 +1665,8 @@ async function startJob(job: Job, now: number): Promise<void> {
           role,
           scheduled: job.kind,
           ts: new Date(now).toISOString(),
+          // Fork (20/11): see stopIsForOtherTurn().
+          turn_id: lock.turnId!,
         },
       },
     })
@@ -1242,7 +1704,8 @@ async function runOutlookWatches(now = Date.now()): Promise<void> {
       // The same outbound gate as a reply, checked again now: access may have
       // changed since the watch was asked for.
       const ref = conversations.get(n.conversationId)
-      if (!ref || !outboundAllowed(ref, loadAccess()).allowed) {
+      // Fork (20/11): in owner mode, only the owner's own 1:1 chat.
+      if (!ref || !outboundAllowed(ref, loadAccess()).allowed || ownerOutboundRefusal(BOT_OWNER, ref, false)) {
         process.stderr.write('msteams channel: outlook watch notice refused: conversation no longer allowed\n')
         continue
       }
@@ -1263,13 +1726,20 @@ async function runOutlookWatches(now = Date.now()): Promise<void> {
  * the bot is free. Called every 30 seconds and after each watch round.
  */
 async function startWatchTask(now = Date.now()): Promise<void> {
-  if (!teamsApp || (activeTurn && !isStale(activeTurn)) || scheduling) return
+  // Fork (20/11): not while a message waits in line either; people first.
+  if (!teamsApp || !idle() || scheduling) return
   const task = readyTasks(STATE_DIR)[0]
   if (!task) return
   const access = loadAccess()
   const ref = conversations.get(task.conversationId)
   // Only in the person's own 1:1 chat, still allowed (the gate also refuses group chats).
-  if (!ref || !outboundAllowed(ref, access).allowed || normalizeSenderId(String(ref.senderId ?? '')) !== task.senderId) {
+  // Fork (20/11): and in owner mode, only the owner's.
+  if (
+    !ref ||
+    !outboundAllowed(ref, access).allowed ||
+    normalizeSenderId(String(ref.senderId ?? '')) !== task.senderId ||
+    ownerOutboundRefusal(BOT_OWNER, ref, false)
+  ) {
     // Revoked since: drop the task silently, like any refusal toward Teams.
     takeTask(STATE_DIR, task)
     process.stderr.write('msteams channel: outlook watch task dropped: sender or chat no longer allowed\n')
@@ -1279,7 +1749,8 @@ async function startWatchTask(now = Date.now()): Promise<void> {
   // Taken before the turn starts, so a crash never runs it twice. Nothing has
   // been awaited since the busy check above, so beginTurn cannot find the bot busy.
   if (!takeTask(STATE_DIR, task)) return
-  if (!(await beginTurn(ref.conversationId, task.senderId, undefined, role, undefined, true))) return
+  const lock = await beginTurn(ref.conversationId, task.senderId, undefined, role, undefined, true)
+  if (!lock) return
   process.stderr.write('msteams channel: outlook watch task started\n')
   void mcp
     .notification({
@@ -1294,6 +1765,8 @@ async function startWatchTask(now = Date.now()): Promise<void> {
           force: 'true',
           watch: 'outlook',
           ts: new Date(now).toISOString(),
+          // Fork (20/11): see stopIsForOtherTurn().
+          turn_id: lock.turnId!,
         },
       },
     })
@@ -1323,6 +1796,11 @@ if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
   teamsApp = app
 
   app.on('message', async ({ activity }: { activity: Record<string, any> }) => {
+    // Fork (18/11): with the ChatMessage.Read.Chat RSC permission every message
+    // of a group chat arrives here. One that does not call the bot is acked and
+    // dropped first: never queued to disk, logged, or passed on.
+    if (isUnaddressedGroupMessage(activity, callPatterns(loadAccess()))) return
+
     // Persist BEFORE acking. A throw here propagates out of the adapter as a
     // 500 so Bot Framework retries rather than the message being lost.
     if (!queue.enqueue(activity)) return // duplicate redelivery
@@ -1373,15 +1851,22 @@ if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
 
   // A lock left by a previous run belongs to a turn that no longer exists.
   clearTurnLock(STATE_DIR)
+  // Fork (20/11): so do this session's permission prompts, and the router's notes for them.
+  if (ROUTE_PERMISSIONS) clearOwnPermissionRoutes(SHARED_DIR, WEBHOOK_PORT)
   // The Stop hook deletes turn.json when Claude finishes; close the status line
   // then. A turn the hook never closes is released after MAX_TURN_MS.
+  // Fork (20/11): and start the next waiting message once the status line is closed.
   setInterval(() => {
-    if (!activeTurn) return
+    if (!activeTurn) {
+      // Fork (20/11): the fallback, for a message left waiting while nothing runs.
+      if (turnQueue.size > 0 && !pumping) void pumpQueue()
+      return
+    }
     if (!existsSync(turnLockPath(STATE_DIR))) {
-      void endTurn(formatDone(activeTurn))
+      void endTurn(formatDone(activeTurn)).finally(() => void pumpQueue())
     } else if (isStale(activeTurn)) {
       clearTurnLock(STATE_DIR)
-      void endTurn(formatTimedOut(activeTurn))
+      void endTurn(formatTimedOut(activeTurn)).finally(() => void pumpQueue())
     } else if (teamsApp && activeTurn.statusMessageId && Date.now() - Math.max(lastTickAt, activeTurn.since) >= STATUS_TICK_MS) {
       // Fork addition: show how long the turn has run, once a minute.
       const turn = activeTurn
@@ -1390,7 +1875,7 @@ if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
       statusTick = statusTick.then(() =>
         activeTurn === turn
           ? app.api.conversations
-              .updateActivity(turn.conversationId, turn.statusMessageId!, {
+              .updateActivity(statusConversationOf(turn)!, turn.statusMessageId!, {
                 type: 'message',
                 text: formatWorking(turn),
                 textFormat: 'plain',
@@ -1438,22 +1923,23 @@ if (!APP_ID || !APP_PASSWORD || !TENANT_ID) {
   // Anything persisted but never finished (crash between ack and dispatch)
   // replays now, without needing a live turn context.
   queue.pruneTombstones()
-  const pending = queue.pending()
+  // Fork (20/11): oldest first, since they now queue behind one another.
+  const pending = queue.pending().sort((a, b) => String(a.receivedAt).localeCompare(String(b.receivedAt)))
   if (pending.length) {
     process.stderr.write(`msteams channel: replaying ${pending.length} unfinished activities\n`)
+    // Fork (20/11): started together rather than awaited one by one. A replayed
+    // message that has to wait settles only when its turn starts; awaiting it
+    // here would hold the rest back while live messages overtake them. Each
+    // dispatch reaches the line with no await, so their order holds.
     for (const entry of pending) {
-      try {
-        await dispatch(entry.rawActivity)
-      } catch (err) {
+      void dispatch(entry.rawActivity)
         // Must not escape: this runs at module top level, after the listener is
         // already live, so a rejection would abort module evaluation and skip
         // everything below — the approval poller, the tombstone timer, and every
         // shutdown handler. The live dispatch path 20 lines above catches for the
         // same reason; the asymmetry was the bug.
-        process.stderr.write(`msteams channel: replay failed: ${err}\n`)
-      } finally {
-        queue.finish(String(entry.rawActivity.id))
-      }
+        .catch(err => process.stderr.write(`msteams channel: replay failed: ${err}\n`))
+        .finally(() => queue.finish(String(entry.rawActivity.id)))
     }
   }
 

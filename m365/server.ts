@@ -21,11 +21,12 @@ import { Mail } from './mail.js'
 import { Files } from './files.js'
 import { Calendar } from './calendar.js'
 import { TeamsChats } from './teams.js'
-import { UserAuths, currentSender } from './users.js'
+import { UserAuths, currentSender, botOwner } from './users.js'
 import { purgeDownloads } from './downloads.js'
 import { INBOX_TTL_MS } from '../src/purge.js'
 import { readTurnLock } from '../src/turn-lock.js'
 import { M365_READ_TOOLS, SCHEDULED_REFUSAL } from '../src/scheduled-guard.js'
+import { m365PrepareOnlyAllowed, OWNER_IDLE_REFUSAL } from '../src/subagent-guard.js'
 
 const config = loadConfig()
 mkdirSync(config.stateDir, { recursive: true, mode: 0o700 })
@@ -424,6 +425,26 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'teams_remove_member',
+      description:
+        'Remove people from a group chat the sender is in, as the sender, in one step (Teams shows who removed them). chat_id is "this" (the group chat the current message came from) or a c_… code from teams_list_chats; people by name as the sender said it or by email, matched against the chat\'s members first (several matches fail with the list: ask which). The sender cannot remove themself.',
+      inputSchema: {
+        type: 'object',
+        properties: { chat_id: { type: 'string' }, people: list },
+        required: ['chat_id', 'people'],
+      },
+    },
+    {
+      name: 'teams_rename_chat',
+      description:
+        'Rename a group chat the sender is in, as the sender, in one step (Teams shows who renamed it). chat_id is "this" (the group chat the current message came from) or a c_… code from teams_list_chats; topic is the new name, exactly as the sender said it. Only group chats have a name.',
+      inputSchema: {
+        type: 'object',
+        properties: { chat_id: { type: 'string' }, topic: { type: 'string' } },
+        required: ['chat_id', 'topic'],
+      },
+    },
+    {
       name: 'files_prepare_share',
       description:
         'Step 1 of sharing a SharePoint/OneDrive file the sender can share (url from teams_read_chat, shared_file_url or files_upload, or file_id from files_search). Exactly one of: organization: true (a view link everyone in the firm can open) or people (colleagues\' emails, view only, no email sent). Changes nothing; returns a plan_id and expect to repeat. To post the link somewhere, send it afterwards with reply or teams_prepare_message.',
@@ -538,8 +559,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const args = (req.params.arguments ?? {}) as any
   // Fork (05/11): a scheduled job (src/schedule.ts) only reads, whatever it is asked.
-  if (readTurnLock(config.msteamsStateDir)?.scheduled && !M365_READ_TOOLS.has(req.params.name)) {
+  const lock = readTurnLock(config.msteamsStateDir)
+  if (lock?.scheduled && !M365_READ_TOOLS.has(req.params.name)) {
     return { content: [{ type: 'text', text: SCHEDULED_REFUSAL }], isError: true }
+  }
+  // Fork (20/11): in a person's own session (BOT_OWNER) with no Teams message being
+  // answered, e.g. a background task or the turn that reports one finished, the
+  // mailbox is the owner's (users.ts) but nobody has just asked for anything: read
+  // and prepare only. Sending waits for the person's own message.
+  if (botOwner() && !lock?.senderId && !m365PrepareOnlyAllowed(req.params.name)) {
+    return { content: [{ type: 'text', text: OWNER_IDLE_REFUSAL }], isError: true }
   }
   try {
     let text: string
@@ -615,6 +644,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         break
       case 'teams_add_member':
         text = await teams.addMembers(args)
+        break
+      case 'teams_rename_chat':
+        text = await teams.renameChat(args)
+        break
+      case 'teams_remove_member':
+        text = await teams.removeMembers(args)
         break
       case 'files_prepare_share':
         text = await files.prepareShare(args)

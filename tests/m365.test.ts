@@ -16,8 +16,8 @@ import { hashOf } from '../m365/handles.js'
 import { makeImagePreview } from '../src/image-preview.js'
 import { GraphAuth, NOT_SIGNED_IN } from '../m365/auth.js'
 import { TokenStore, plainProtector, dpapiProtector, keyFileProtector } from '../m365/token-store.js'
-import { currentSender, tokenPath, UserAuths, NO_TEAMS_SENDER } from '../m365/users.js'
-import { writeTurnLock } from '../src/turn-lock.js'
+import { currentSender, tokenPath, UserAuths, NO_TEAMS_SENDER, NOT_THE_OWNER, BAD_OWNER } from '../m365/users.js'
+import { writeTurnLock, clearTurnLock } from '../src/turn-lock.js'
 
 type Call = { method: string; url: string; body: any; auth: string | null }
 
@@ -458,6 +458,28 @@ describe('whose mailbox', () => {
     expect(() => currentSender(dir)).toThrow(NO_TEAMS_SENDER)
     writeTurnLock(dir, { since: Date.now(), conversationId: 'a:1', senderId: '../../etc/passwd' })
     expect(() => currentSender(dir)).toThrow(NO_TEAMS_SENDER)
+  })
+
+  test('in a per-person session (BOT_OWNER): the owner, with or without a turn; anyone else is refused', () => {
+    const OWNER = '11111111-1111-1111-1111-111111111111'
+    const OTHER = '22222222-2222-2222-2222-222222222222'
+    clearTurnLock(dir)
+    // No Teams turn (a background task): the owner's own mailbox, never "no sender".
+    expect(currentSender(dir, OWNER.toUpperCase())).toBe(OWNER)
+    writeTurnLock(dir, { since: Date.now(), conversationId: 'a:1' })
+    expect(currentSender(dir, OWNER)).toBe(OWNER)
+    writeTurnLock(dir, { since: Date.now(), conversationId: 'a:1', senderId: OWNER.toUpperCase() })
+    expect(currentSender(dir, ` ${OWNER} `)).toBe(OWNER)
+    writeTurnLock(dir, { since: Date.now(), conversationId: 'a:1', senderId: OTHER })
+    expect(() => currentSender(dir, OWNER)).toThrow(NOT_THE_OWNER)
+    writeTurnLock(dir, { since: Date.now(), conversationId: 'a:1', senderId: '../../etc/passwd' })
+    expect(() => currentSender(dir, OWNER)).toThrow(NOT_THE_OWNER)
+    // A malformed BOT_OWNER fails closed, turn or no turn.
+    expect(() => currentSender(dir, 'owner-id')).toThrow(BAD_OWNER)
+    clearTurnLock(dir)
+    expect(() => currentSender(dir, 'owner-id')).toThrow(BAD_OWNER)
+    // Empty BOT_OWNER is the shared session: no turn, no mailbox.
+    expect(() => currentSender(dir, '')).toThrow(NO_TEAMS_SENDER)
   })
 
   test('each person has their own token file, and ids cannot escape the folder', () => {

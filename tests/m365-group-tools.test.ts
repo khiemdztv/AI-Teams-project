@@ -200,3 +200,78 @@ describe('sharing a file', () => {
     expect(writes(g)).toHaveLength(0)
   })
 })
+
+describe('renaming a group chat (18/11)', () => {
+  const renameRoutes = (chatType = 'group') => ({
+    ...routes(chatType),
+    [`GET /me/chats/${encodeURIComponent(GROUP)}`]: () => ({ json: groupChat(chatType) }),
+    [`PATCH /chats/${encodeURIComponent(GROUP)}`]: () => ({ status: 204 }),
+  })
+
+  test('renames the group chat the message came from, in one step', async () => {
+    const g = fakeGraph(renameRoutes())
+    const out = await teams(g.fetchImpl).renameChat({ chat_id: 'this', topic: '  test   team agent ' })
+    expect(out).toContain('from "Internal IT" to "test team agent"')
+    expect(writes(g)).toEqual([
+      { method: 'PATCH', path: `/chats/${encodeURIComponent(GROUP)}`, body: { topic: 'test team agent' } },
+    ])
+  })
+
+  test('the same name writes nothing', async () => {
+    const g = fakeGraph(renameRoutes())
+    expect(await teams(g.fetchImpl).renameChat({ chat_id: 'this', topic: 'Internal IT' })).toContain('already named')
+    expect(writes(g)).toEqual([])
+  })
+
+  test('refuses a 1:1 chat, an empty or too long name, and a raw Graph id', async () => {
+    const one = fakeGraph(renameRoutes('oneOnOne'))
+    await expect(teams(one.fetchImpl).renameChat({ chat_id: 'this', topic: 'x' })).rejects.toThrow(/only a group chat/)
+    const g = fakeGraph(renameRoutes())
+    await expect(teams(g.fetchImpl).renameChat({ chat_id: 'this', topic: '  ' })).rejects.toThrow(/topic is required/)
+    await expect(teams(g.fetchImpl).renameChat({ chat_id: 'this', topic: 'x'.repeat(251) })).rejects.toThrow(/too long/)
+    await expect(teams(g.fetchImpl).renameChat({ chat_id: GROUP, topic: 'x' })).rejects.toThrow(/c_/)
+    expect(writes(one)).toEqual([])
+    expect(writes(g)).toEqual([])
+  })
+})
+
+describe('removing people from a group chat (18/11)', () => {
+  const members = [
+    { id: 'mem-me', userId: 'me-id', displayName: 'An Nguyễn', email: 'sam@fabrikam.com' },
+    { id: 'mem-ha', userId: 'ha-id', displayName: 'Hà', email: 'ha@fabrikam.com' },
+    { id: 'mem-dan', userId: 'dan-id', displayName: 'Hoàng Minh Đức (Daniel)', email: 'duc.hoang@fabrikam.com' },
+    { id: 'mem-dan2', userId: 'dan2-id', displayName: 'Daniel Trần', email: 'daniel.tran@fabrikam.com' },
+  ]
+  const removeRoutes = (chatType = 'group') => ({
+    ...routes(chatType),
+    [`GET /me/chats/${encodeURIComponent(GROUP)}?`]: () => ({ json: { id: GROUP, chatType, topic: 'Internal IT', members } }),
+    [`DELETE /chats/${encodeURIComponent(GROUP)}/members/`]: () => ({ status: 204 }),
+  })
+
+  test('removes by email or by name in the chat, accents ignored, in one step', async () => {
+    const g = fakeGraph(removeRoutes())
+    const out = await teams(g.fetchImpl).removeMembers({ chat_id: 'this', people: ['ha@fabrikam.com', 'hoang minh duc'] })
+    expect(out).toContain('Removed from the group chat "Internal IT"')
+    expect(writes(g).map(c => `${c.method} ${c.path}`)).toEqual([
+      `DELETE /chats/${encodeURIComponent(GROUP)}/members/mem-ha`,
+      `DELETE /chats/${encodeURIComponent(GROUP)}/members/mem-dan`,
+    ])
+  })
+
+  test('a name matching several members fails with the list and removes nobody', async () => {
+    const g = fakeGraph(removeRoutes())
+    await expect(teams(g.fetchImpl).removeMembers({ chat_id: 'this', people: ['Daniel'] })).rejects.toThrow(/matches several people/)
+    expect(writes(g)).toEqual([])
+  })
+
+  test('refuses the sender, someone not in the chat, a 1:1 chat, and an empty list', async () => {
+    const g = fakeGraph(removeRoutes())
+    await expect(teams(g.fetchImpl).removeMembers({ chat_id: 'this', people: ['sam@fabrikam.com'] })).rejects.toThrow(/cannot remove themself/)
+    await expect(teams(g.fetchImpl).removeMembers({ chat_id: 'this', people: ['kien.do@fabrikam.com'] })).rejects.toThrow(/is not in this chat/)
+    await expect(teams(g.fetchImpl).removeMembers({ chat_id: 'this', people: [] })).rejects.toThrow(/people is required/)
+    const one = fakeGraph(removeRoutes('oneOnOne'))
+    await expect(teams(one.fetchImpl).removeMembers({ chat_id: 'this', people: ['Hà'] })).rejects.toThrow(/only be removed from a group chat/)
+    expect(writes(g)).toEqual([])
+    expect(writes(one)).toEqual([])
+  })
+})

@@ -33,7 +33,7 @@ export const MSTEAMS_SCHEDULED_TOOLS = new Set(['reply', 'notes_list', 'log_inte
 const BUILTIN_TOOLS = new Set(['Read', 'ToolSearch', 'TodoWrite'])
 
 /** "mcp__plugin_msteams_m365__mail_list_messages" -> { server: "m365", tool: "mail_list_messages" }. */
-function mcpName(toolName: string): { server: string; tool: string } | null {
+export function mcpName(toolName: string): { server: string; tool: string } | null {
   const parts = toolName.split('__')
   if (parts.length !== 3 || parts[0] !== 'mcp') return null
   const server = parts[1]!.replace(/^plugin_msteams_/, '')

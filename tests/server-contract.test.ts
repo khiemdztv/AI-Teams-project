@@ -100,14 +100,17 @@ describe('channel registration', () => {
 describe('tool surface', () => {
   test('exactly the four MVP tools, plus the fork make_pdf, make_video, log_internal, notes and watch_outlook tools, are exposed', () => {
     expect(tools.map(t => t.name).sort()).toEqual([
+      'call_link',
       'download_attachment',
       'edit_message',
       'log_internal',
       'make_pdf',
       'make_video',
+      'meeting_transcript',
       'note_add',
       'note_done',
       'notes_list',
+      'notify_activity',
       'react',
       'reply',
       'watch_outlook',
@@ -128,7 +131,10 @@ describe('tool surface', () => {
     // would be reaching Teams without passing the gate at all.
     // make_video, log_internal and the notes tools write local files and address no conversation.
     // watch_outlook reports later in the turn's own chat, through the same gate, never one Claude names.
-    const local = ['download_attachment', 'make_pdf', 'make_video', 'log_internal', 'notes_list', 'note_add', 'note_done', 'watch_outlook']
+    // meeting_transcript sends nothing; it reads the turn's own meeting chat (or the one handed off), checked in the server.
+    // call_link only builds a link the sender clicks.
+    // notify_activity rings members of the turn's own group chat (or the one handed off), checked in the server.
+    const local = ['download_attachment', 'make_pdf', 'make_video', 'log_internal', 'notes_list', 'note_add', 'note_done', 'watch_outlook', 'meeting_transcript', 'notify_activity', 'call_link']
     for (const tool of tools.filter(t => !local.includes(t.name))) {
       expect(tool.inputSchema.required).toContain('conversation_id')
     }

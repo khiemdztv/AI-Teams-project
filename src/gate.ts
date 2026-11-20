@@ -302,6 +302,42 @@ type MentionEntity = { type?: string; mentioned?: { id?: string } }
  * so they are trusted input; an invalid pattern is skipped rather than thrown,
  * matching discord's `isMentioned`.
  */
+/**
+ * Fork (18/11): ways to call the bot in a group chat without an @mention, used
+ * when access.json sets no `mentionPatterns`. They only matter once the Teams
+ * app holds the ChatMessage.Read.Chat RSC permission (teams-app/manifest.json),
+ * since without it Teams delivers only messages that @mention the bot. A
+ * message must start with the call: "agent ơi, …", "Agent, …", "Fabrikam Agent …".
+ */
+export const DEFAULT_CALL_PATTERNS = [
+  '^\\s*(fabrikam\\s+)?agent\\s*(ơi|oi)?\\s*[,:!.]',
+  '^\\s*(fabrikam\\s+)?agent\\s+(ơi|oi)\\b',
+  '^\\s*fabrikam\\s+agent\\b',
+]
+
+/** The call patterns in force: the operator's, or the defaults. */
+export function callPatterns(access: Pick<Access, 'mentionPatterns'>): string[] {
+  return access.mentionPatterns ?? DEFAULT_CALL_PATTERNS
+}
+
+/**
+ * Fork (18/11): a group-chat or channel message that does not call the bot.
+ * With the RSC permissions (ChatMessage.Read.Chat, ChannelMessage.Read.Group)
+ * the bot receives every message of its group chats and teams; these are
+ * dropped before anything else, so they are never persisted, logged, or seen.
+ * A channel message that does call the bot still goes on to the gate, which
+ * refuses channels for now.
+ */
+export function isUnaddressedGroupMessage(
+  activity: { conversation?: { conversationType?: string }; entities?: unknown; recipient?: { id?: string }; text?: unknown },
+  patterns: string[],
+): boolean {
+  const type = activity.conversation?.conversationType
+  if (type !== 'groupChat' && type !== 'channel') return false
+  const text = typeof activity.text === 'string' ? activity.text : undefined
+  return !mentionsBot(activity.entities, activity.recipient?.id, text, patterns)
+}
+
 export function mentionsBot(
   entities: unknown,
   recipientId: string | undefined,

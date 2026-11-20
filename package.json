@@ -8,6 +8,7 @@
     "start": "bun install --frozen-lockfile --production --no-summary && bun server.ts",
     "dev": "bun install --frozen-lockfile --no-summary && bun server.ts",
     "m365": "bun m365/server.ts",
+    "router": "bun router.ts",
     "test": "bun test",
     "typecheck": "tsc"
   },

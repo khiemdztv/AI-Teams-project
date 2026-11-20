@@ -24,3 +24,17 @@ import { join } from 'path'
 export function stateDir(): string {
   return process.env.MSTEAMS_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'msteams')
 }
+
+/**
+ * Fork (20/11): the root state dir, for the files every session shares when
+ * each person has their own Claude Code session behind one router: `.env`,
+ * `access.json`, `schedules.json`, `workers.json`, `conversations/`,
+ * `approved/` and `permission-routes/`. Everything else (turn.json, queue/,
+ * inbox/, bot.pid, logs, ...) stays in this session's own `stateDir()`.
+ *
+ * `MSTEAMS_ROOT_DIR` unset: the same dir as `stateDir()`, which is how the bot
+ * ran before 20/11 and is the rollback.
+ */
+export function sharedDir(): string {
+  return process.env.MSTEAMS_ROOT_DIR ?? stateDir()
+}

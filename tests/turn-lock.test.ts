@@ -21,7 +21,19 @@ import {
   USER_WORKING,
   formatTimedOut,
   MAX_TURN_MS,
+  statusTarget,
+  statusConversationOf,
+  markReplied,
+  repliedSince,
+  shouldNudgeReply,
+  NO_REPLY_NUDGE,
+  newTurnId,
+  mentionsTurn,
+  transcriptHasTurn,
+  stopIsForOtherTurn,
+  TRANSCRIPT_TAIL_BYTES,
 } from '../src/turn-lock.js'
+import { spawnSync } from 'child_process'
 
 const ROOT = join(import.meta.dir, '..')
 
@@ -84,7 +96,9 @@ describe('Stop hook', () => {
     })
 
   test('clears the lock and exits 0', () => {
-    writeTurnLock(dir, { since: Date.now(), conversationId: 'a:1' })
+    const since = Date.now()
+    writeTurnLock(dir, { since, conversationId: 'a:1' })
+    markReplied(dir, since) // a turn that replied; see "no-reply nudge" below
     const result = runHook()
     expect(result.exitCode).toBe(0)
     expect(existsSync(turnLockPath(dir))).toBe(false)
@@ -140,5 +154,145 @@ describe('status lines for a non-admin (fork, 02/11)', () => {
       expect(formatDone(l, 29_400)).toContain('✅ Xong (29 giây)')
       expect(formatTimedOut(l)).toBe(STATUS_TIMED_OUT)
     }
+  })
+})
+
+describe('status target (18/11)', () => {
+  test('a 1:1 chat or channel keeps its status lines', () => {
+    expect(statusTarget('personal', 'a:1', undefined)).toBe('a:1')
+    expect(statusTarget('channel', '19:c', 'a:dm')).toBe('19:c')
+    expect(statusTarget(undefined, 'a:1', undefined)).toBe('a:1')
+  })
+
+  test("a group chat sends them to the sender's 1:1 chat, or nowhere", () => {
+    expect(statusTarget('groupChat', '19:g', 'a:dm')).toBe('a:dm')
+    expect(statusTarget('groupChat', '19:g', undefined)).toBeNull()
+  })
+
+  test('the lock remembers where they went', () => {
+    expect(statusConversationOf({ since: 1, conversationId: 'a:1' })).toBe('a:1')
+    expect(statusConversationOf({ since: 1, conversationId: '19:g', statusConversationId: 'a:dm' })).toBe('a:dm')
+    expect(statusConversationOf({ since: 1, conversationId: '19:g', statusConversationId: null })).toBeNull()
+  })
+})
+
+describe('no-reply nudge (18/11)', () => {
+  test('nudges once when a Teams turn ended without reply', () => {
+    const lock = { since: 1000, conversationId: 'a:1' }
+    expect(shouldNudgeReply(lock, null, false)).toBe(true)
+    expect(shouldNudgeReply(lock, 999, false)).toBe(true) // an older turn's reply
+    expect(shouldNudgeReply(lock, 1000, false)).toBe(false)
+    expect(shouldNudgeReply(lock, null, true)).toBe(false) // the stop after a nudge
+    expect(shouldNudgeReply(null, null, false)).toBe(false) // not a Teams turn
+  })
+
+  test('markReplied round-trips', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'replied-'))
+    expect(repliedSince(dir)).toBeNull()
+    markReplied(dir, 1234)
+    expect(repliedSince(dir)).toBe(1234)
+  })
+
+  const runHook = (dir: string, input: object) =>
+    spawnSync('bun', [join(ROOT, 'hooks/turn-done.ts')], {
+      input: JSON.stringify(input),
+      env: { ...process.env, MSTEAMS_STATE_DIR: dir },
+      encoding: 'utf8',
+    })
+
+  test('the hook blocks the first stop and keeps the lock, then releases it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-'))
+    writeTurnLock(dir, { since: 5, conversationId: 'a:1' })
+    const first = runHook(dir, { hook_event_name: 'Stop', stop_hook_active: false })
+    expect(first.status).toBe(0)
+    expect(JSON.parse(first.stdout)).toEqual({ decision: 'block', reason: NO_REPLY_NUDGE })
+    expect(existsSync(turnLockPath(dir))).toBe(true)
+    const second = runHook(dir, { hook_event_name: 'Stop', stop_hook_active: true })
+    expect(second.stdout).toBe('')
+    expect(existsSync(turnLockPath(dir))).toBe(false)
+  })
+
+  test('the hook lets a replied turn, or a failed one, end at once', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hook-'))
+    writeTurnLock(dir, { since: 7, conversationId: 'a:1' })
+    markReplied(dir, 7)
+    expect(runHook(dir, { hook_event_name: 'Stop', stop_hook_active: false }).stdout).toBe('')
+    expect(existsSync(turnLockPath(dir))).toBe(false)
+    writeTurnLock(dir, { since: 8, conversationId: 'a:1' })
+    expect(runHook(dir, { hook_event_name: 'StopFailure' }).stdout).toBe('')
+    expect(existsSync(turnLockPath(dir))).toBe(false)
+  })
+})
+
+describe('turn id (20/11)', () => {
+  test('8 random hex chars', () => {
+    const a = newTurnId()
+    expect(a).toMatch(/^[0-9a-f]{8}$/)
+    expect(newTurnId()).not.toBe(a)
+  })
+
+  test('found in the channel tag, whether or not the JSONL escaped its quotes', () => {
+    expect(mentionsTurn('<channel source="msteams" turn_id="0a1b2c3d">', '0a1b2c3d')).toBe(true)
+    expect(mentionsTurn(JSON.stringify({ content: '<channel turn_id="0a1b2c3d">hi</channel>' }), '0a1b2c3d')).toBe(true)
+    expect(mentionsTurn('turn_id="0a1b2c3e"', '0a1b2c3d')).toBe(false)
+    expect(mentionsTurn('0a1b2c3d', '0a1b2c3d')).toBe(false)
+    expect(mentionsTurn('turn_id=".*"', '.*')).toBe(false) // not an id: never a pattern
+  })
+
+  test('read from the transcript tail, and further back when a long turn pushed it out', () => {
+    const path = join(dir, 'transcript.jsonl')
+    const line = (s: string) => JSON.stringify({ type: 'user', message: { content: s } }) + '\n'
+    writeFileSync(path, line('<channel turn_id="0a1b2c3d">x</channel>') + 'y'.repeat(TRANSCRIPT_TAIL_BYTES * 3) + '\n')
+    expect(transcriptHasTurn(path, '0a1b2c3d')).toBe(true)
+    expect(transcriptHasTurn(path, 'ffffffff')).toBe(false)
+    expect(transcriptHasTurn(join(dir, 'missing.jsonl'), '0a1b2c3d')).toBeNull()
+  })
+
+  test('the Stop hook leaves the lock only when the lock names a turn the transcript lacks', () => {
+    const path = join(dir, 't.jsonl')
+    writeFileSync(path, JSON.stringify({ content: '<channel turn_id="0a1b2c3d">' }) + '\n')
+    const lock = { since: 1, conversationId: 'a:1', turnId: '0a1b2c3d' }
+    expect(stopIsForOtherTurn(lock, path)).toBe(false)
+    expect(stopIsForOtherTurn({ ...lock, turnId: 'ffffffff' }, path)).toBe(true)
+    // As before 20/11: no turnId, no transcript path, or an unreadable transcript.
+    expect(stopIsForOtherTurn({ since: 1, conversationId: 'a:1' }, path)).toBe(false)
+    expect(stopIsForOtherTurn({ ...lock, turnId: 'ffffffff' }, undefined)).toBe(false)
+    expect(stopIsForOtherTurn({ ...lock, turnId: 'ffffffff' }, join(dir, 'missing.jsonl'))).toBe(false)
+    expect(stopIsForOtherTurn(null, path)).toBe(false)
+  })
+
+  const runHook = (input: object) =>
+    spawnSync('bun', [join(ROOT, 'hooks/turn-done.ts')], {
+      input: JSON.stringify(input),
+      env: { ...process.env, MSTEAMS_STATE_DIR: dir },
+      encoding: 'utf8',
+    })
+
+  test("a wake-up turn's Stop neither clears nor nudges; the Teams turn's Stop then does", () => {
+    const path = join(dir, 'session.jsonl')
+    writeFileSync(path, JSON.stringify({ content: 'a background task finished' }) + '\n')
+    writeTurnLock(dir, { since: 9, conversationId: 'a:1', turnId: '0a1b2c3d' })
+    const early = runHook({ hook_event_name: 'Stop', stop_hook_active: false, transcript_path: path })
+    expect(early.status).toBe(0)
+    expect(early.stdout).toBe('')
+    expect(existsSync(turnLockPath(dir))).toBe(true)
+    const failed = runHook({ hook_event_name: 'StopFailure', transcript_path: path })
+    expect(failed.stdout).toBe('')
+    expect(existsSync(turnLockPath(dir))).toBe(true)
+
+    writeFileSync(path, JSON.stringify({ content: '<channel source="msteams" turn_id="0a1b2c3d">hi</channel>' }) + '\n', { flag: 'a' })
+    markReplied(dir, 9)
+    const done = runHook({ hook_event_name: 'Stop', stop_hook_active: false, transcript_path: path })
+    expect(done.stdout).toBe('')
+    expect(existsSync(turnLockPath(dir))).toBe(false)
+  })
+
+  test('the nudge still applies to the Teams turn itself', () => {
+    const path = join(dir, 'session.jsonl')
+    writeFileSync(path, JSON.stringify({ content: '<channel turn_id="0a1b2c3d">hi</channel>' }) + '\n')
+    writeTurnLock(dir, { since: 10, conversationId: 'a:1', turnId: '0a1b2c3d' })
+    const first = runHook({ hook_event_name: 'Stop', stop_hook_active: false, transcript_path: path })
+    expect(JSON.parse(first.stdout)).toEqual({ decision: 'block', reason: NO_REPLY_NUDGE })
+    expect(existsSync(turnLockPath(dir))).toBe(true)
   })
 })
